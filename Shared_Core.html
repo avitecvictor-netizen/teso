@@ -1,0 +1,410 @@
+<script>
+/**
+ * VEVA - Nucleo de aplicacion (sin React / JSX / Babel).
+ * Responsabilidad unica: namespace global, utilidades transversales,
+ * bridge con Apps Script, layout base (sidebar) y router de vistas.
+ * No contiene logica de negocio de ningun modulo especifico (separacion de capas).
+ *
+ * CSS: Tailwind estatico compilado (ver Styles.html), no CDN runtime, no Bootstrap.
+ * Paleta y clases tomadas literal de _source/Index.jsx (React legado), no inventadas.
+ */
+window.VEVA = window.VEVA || {};
+
+// ---------------------------------------------------------------------------
+// VEVA.gas - bridge promisificado hacia google.script.run.
+// Reemplaza el "gasCall" que en el prototipo React se duplicaba en cada
+// componente (Cobranza, FlujoEfectivo, AdminFlujo, etc.) - aqui vive una sola vez.
+// ---------------------------------------------------------------------------
+VEVA.gas = function (fnName, payload) {
+  return new Promise(function (resolve, reject) {
+    if (typeof google === 'undefined' || !google.script || !google.script.run) {
+      reject(new Error('google.script.run no disponible (se ejecuto fuera de Apps Script)'));
+      return;
+    }
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(reject)
+      [fnName](payload);
+  });
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.fmt - formato de numeros y moneda, fuente unica.
+// ---------------------------------------------------------------------------
+VEVA.fmt = {
+  mxn: function (n) {
+    return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', maximumFractionDigits: 0 }).format(n || 0);
+  },
+  num: function (n) {
+    return (n == null || isNaN(n)) ? '—' : Math.round(n).toLocaleString('es-MX');
+  },
+  signed: function (n) {
+    if (n == null) return '—';
+    var abs = Math.abs(Math.round(n)).toLocaleString('es-MX');
+    return n < 0 ? '(' + abs + ')' : abs;
+  },
+  // Copiado literal de fmtK en _source/Index.jsx:158 (usado en tooltips/leyendas de graficas)
+  k: function (v) {
+    return v >= 1000000
+      ? '$' + (v / 1000000).toFixed(1) + 'M'
+      : '$' + Math.round(v / 1000).toLocaleString('es-MX') + 'K';
+  }
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.dom - azucar minima para construir DOM sin JSX ni innerHTML masivo.
+// No es un virtual DOM: crea nodos reales directamente. Se mantiene
+// deliberadamente pequeno para no terminar reinventando React (regla KISS).
+// ---------------------------------------------------------------------------
+VEVA.dom = {
+  el: function (tag, attrs, children) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v == null) return; // evita setAttribute(k, null) -> atributos booleanos (disabled) quedarian "presentes" siempre
+      if (k === 'class') node.className = v;
+      else if (k.indexOf('on') === 0 && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
+      else node.setAttribute(k, v);
+    });
+    (children || []).forEach(function (c) {
+      if (c == null) return;
+      node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return node;
+  },
+  clear: function (node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.dom.multiSelect - dropdown de seleccion multiple, usado por 5 vistas
+// del React original (Cobranza, ClasificadorMovimientos, ConciliacionMensual,
+// ValidacionSaldos y otra) - se centraliza aqui por DRY en vez de duplicarlo.
+// Puerto directo del componente MultiSelect (_source/Index.jsx linea 179).
+// El estado "abierto/cerrado" no vive aca (este helper no tiene estado
+// propio, solo pinta): cada vista lo guarda en su propio `state.openFilter`
+// y lo pasa via cfg.isOpen, igual que el resto del patron state+redraw().
+// ---------------------------------------------------------------------------
+VEVA.dom.multiSelect = function (cfg) {
+  var allSelected = cfg.value.length === 0;
+  var display = allSelected ? (cfg.placeholder || 'Todos')
+    : cfg.value.length === 1 ? cfg.value[0]
+    : cfg.value.length + ' seleccionados';
+
+  var btn = VEVA.dom.el('button', {
+    class: 'flex items-center gap-2 px-3 py-1.5 bg-white border rounded-lg text-[12px] min-w-[130px] justify-between transition-all ' +
+      (cfg.isOpen ? 'border-[#635bff]' : 'border-[#e6ebf1] hover:border-[#635bff]/50'),
+    onClick: function (e) { e.stopPropagation(); cfg.onToggleOpen(); }
+  }, [
+    VEVA.dom.el('span', { class: allSelected ? 'text-[#697386]' : 'text-[#0a2540] font-medium' }, [display]),
+    VEVA.icon('chevron-down', 11, 'text-[#697386] flex-shrink-0')
+  ]);
+
+  var wrap = VEVA.dom.el('div', { class: 'relative inline-block', 'data-multiselect': '1' }, [btn]);
+
+  if (cfg.isOpen) {
+    var items = [VEVA.dom.el('button', {
+      class: 'w-full text-left px-4 py-2 text-[12px] text-[#697386] hover:bg-[#f6f9fc]',
+      onClick: function (e) { e.stopPropagation(); cfg.onChange([]); }
+    }, ['Todos'])];
+
+    cfg.options.forEach(function (opt) {
+      var checked = cfg.value.indexOf(opt) >= 0;
+      var checkbox = VEVA.dom.el('input', { type: 'checkbox', class: 'accent-[#635bff]' }, []);
+      checkbox.checked = checked;
+      checkbox.addEventListener('click', function (e) { e.stopPropagation(); });
+      checkbox.addEventListener('change', function () {
+        var next = checked ? cfg.value.filter(function (v) { return v !== opt; }) : cfg.value.concat([opt]);
+        cfg.onChange(next);
+      });
+      items.push(VEVA.dom.el('label', { class: 'flex items-center gap-3 px-4 py-2 hover:bg-[#f6f9fc] cursor-pointer' }, [
+        checkbox, VEVA.dom.el('span', { class: 'text-[12px] text-[#0a2540]' }, [opt])
+      ]));
+    });
+
+    wrap.appendChild(VEVA.dom.el('div', {
+      class: 'absolute top-full mt-1 left-0 z-50 bg-white border border-[#e6ebf1] rounded-xl shadow-lg min-w-[180px] py-1 max-h-52 overflow-y-auto'
+    }, items));
+  }
+  return wrap;
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.tipoStyle / VEVA.bankBadge - clasificacion visual de movimientos y
+// bancos, copiados literal de _source/Index.jsx lineas 115-170. Se usan en
+// mas de una vista (Clasificador, ConciliacionMensual, y otras) -> viven
+// aqui por DRY en vez de duplicarse en cada View_X.html.
+// ---------------------------------------------------------------------------
+VEVA.TIPO_CONFIG = {
+  'NOMINA':             { bg: 'bg-purple-100',  text: 'text-purple-700',  label: 'Nomina'         },
+  'PROVEEDORES':        { bg: 'bg-blue-100',    text: 'text-blue-700',    label: 'Proveedores'    },
+  'IMPUESTOS':          { bg: 'bg-red-100',     text: 'text-red-700',     label: 'Impuestos'      },
+  'COBRANZA':           { bg: 'bg-emerald-100', text: 'text-emerald-700', label: 'Cobranza'       },
+  'TRASPASOS_INTERNOS': { bg: 'bg-amber-100',   text: 'text-amber-700',   label: 'Traspasos'      },
+  'INTERCIAS':          { bg: 'bg-cyan-100',    text: 'text-cyan-700',    label: 'Intercias'      },
+  'COMISIONES':         { bg: 'bg-orange-100',  text: 'text-orange-700',  label: 'Comisiones'     },
+  'OPERATIVOS':         { bg: 'bg-teal-100',    text: 'text-teal-700',    label: 'Operativos'     },
+  'INVERSION':          { bg: 'bg-sky-100',     text: 'text-sky-700',     label: 'Inversion'      },
+  'PRESTAMOS':          { bg: 'bg-rose-100',    text: 'text-rose-700',    label: 'Prestamos'      },
+  'OTROS':              { bg: 'bg-slate-100',   text: 'text-slate-600',   label: 'Otros'          },
+  'SIN_CLASIFICAR':     { bg: 'bg-gray-100',    text: 'text-gray-500',    label: 'Sin clasificar' }
+};
+var _TIPO_NORM = {
+  'TRANSFERENCIA_INT':     'TRASPASOS_INTERNOS',
+  'TRANSFERENCIA_INTERNA': 'TRASPASOS_INTERNOS',
+  'TRASPASOS':             'TRASPASOS_INTERNOS',
+  'TRASPASOS_INTERCIA':    'TRASPASOS_INTERNOS',
+  'DEPOSITOS':             'OPERATIVOS',
+  'INVERSIONES':           'INVERSION',
+  'INTERESES':             'INVERSION',
+  'PRESTAMOS_INTERNOS':    'PRESTAMOS'
+};
+VEVA.tipoStyle = function (t) {
+  var k = (t || '').toUpperCase().replace(/\s+/g, '_');
+  var norm = _TIPO_NORM[k] || k;
+  return VEVA.TIPO_CONFIG[norm] || VEVA.TIPO_CONFIG[k] || { bg: 'bg-gray-100', text: 'text-gray-600', label: t || 'Sin clasificar' };
+};
+VEVA.TIPOS_LISTA = Object.keys(VEVA.TIPO_CONFIG);
+
+VEVA.BANK_STYLE = {
+  'bbva':        { bg: '#004481', label: 'BBVA' },
+  'santander':   { bg: '#EC0000', label: 'SANT' },
+  'banorte':     { bg: '#7B2D5E', label: 'BNRT' },
+  'inbursa':     { bg: '#003087', label: 'INBR' },
+  'banamex':     { bg: '#00356B', label: 'BNMX' },
+  'citibanamex': { bg: '#00356B', label: 'CITI' },
+  'hsbc':        { bg: '#DB0011', label: 'HSBC' },
+  'scotiabank':  { bg: '#DA0000', label: 'SCOT' }
+};
+VEVA.dom.bankBadge = function (name) {
+  var key = (name || '').toLowerCase().split(' ')[0];
+  var s = VEVA.BANK_STYLE[key] || { bg: '#697386', label: (name || '?').substring(0, 4).toUpperCase() };
+  var span = VEVA.dom.el('span', { class: 'inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold text-white tracking-wide whitespace-nowrap flex-shrink-0' }, [s.label]);
+  span.style.backgroundColor = s.bg;
+  return span;
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.icon - subconjunto de iconos SVG inline, copiados literal de _IP en
+// _source/Index.jsx (mismo criterio que el prototipo original: paths crudos,
+// sin libreria de iconos con ciclo de vida propio).
+// ---------------------------------------------------------------------------
+VEVA.ICONS = {
+  'alert-circle':     '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+  'arrow-right':      '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+  'bar-chart-2':      '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  'bar-chart-3':      '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  'building-2':       '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
+  'calendar':         '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  'calendar-x':       '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="10" y1="14" x2="14" y2="18"/><line x1="14" y1="14" x2="10" y2="18"/>',
+  'check-circle':     '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+  'chevron-down':     '<polyline points="6 9 12 15 18 9"/>',
+  'chevron-right':    '<polyline points="9 18 15 12 9 6"/>',
+  'construction':     '<rect x="2" y="6" width="20" height="8" rx="1"/><path d="M17 14v7"/><path d="M7 14v7"/><path d="M17 3v3"/><path d="M7 3v3"/><path d="M10 14 2.3 6.3"/><path d="M14 6l7.7 7.7"/><path d="m8 6 8 8"/>',
+  'credit-card':      '<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
+  'database':         '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+  'download':         '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  'file-plus':        '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>',
+  'file-text':        '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  'history':          '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
+  'home':             '<path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+  'layout-dashboard': '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+  'loader':           '<line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>',
+  'mail':             '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>',
+  'menu':             '<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>',
+  'package':          '<line x1="16.5" y1="9.4" x2="7.5" y2="4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
+  'plus':             '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  'git-merge':        '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
+  'refresh':          '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+  'refresh-cw':       '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  'save':             '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+  'scale':            '<path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21H17"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/>',
+  'search':           '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  'send':             '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+  'settings':         '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  'shield':           '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  'shield-check':     '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
+  'table-2':          '<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
+  'tag':              '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
+  'trending-up':      '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
+  'truck':            '<rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>',
+  'upload-cloud':     '<polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>',
+  'user':             '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  'users':            '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  'wallet':           '<path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>',
+  'x':                '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  'activity':         '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  'sliders':          '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+  'chevron-up':       '<polyline points="18 15 12 9 6 15"/>'
+};
+VEVA.icon = function (name, size, className) {
+  var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', size || 16);
+  svg.setAttribute('height', size || 16);
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  if (className) svg.setAttribute('class', className);
+  svg.innerHTML = VEVA.ICONS[name] || '';
+  return svg;
+};
+
+// ---------------------------------------------------------------------------
+// VEVA.router - reemplaza useState('view') + render condicional de React.
+// Cada vista se registra con VEVA.registerView(id, { render, destroy }).
+// Sin auto-refresh (regla 02.3): solo cambia de vista por click del usuario.
+// ---------------------------------------------------------------------------
+VEVA.views = {};
+VEVA.registerView = function (id, viewModule) { VEVA.views[id] = viewModule; };
+
+VEVA.router = (function () {
+  var current = null;
+  var mount = null;
+  function go(viewId) {
+    if (!mount) mount = document.getElementById('veva-main');
+    if (current && VEVA.views[current] && typeof VEVA.views[current].destroy === 'function') {
+      VEVA.views[current].destroy();
+    }
+    VEVA.dom.clear(mount);
+    document.querySelectorAll('[data-nav]').forEach(function (btn) {
+      var active = btn.getAttribute('data-nav') === viewId;
+      btn.classList.toggle('bg-[#635bff]/10', active);
+      btn.classList.toggle('text-[#635bff]', active);
+      btn.classList.toggle('text-[#424770]', !active);
+    });
+    var view = VEVA.views[viewId];
+    current = viewId;
+    if (!view) {
+      mount.appendChild(VEVA.dom.el('div', { class: 'flex flex-col items-center justify-center py-20 text-[#697386] space-y-4' }, [
+        VEVA.dom.el('div', { class: 'w-16 h-16 bg-white rounded-2xl border border-[#e6ebf1] flex items-center justify-center shadow-sm' }, [VEVA.icon('construction', 32, 'text-[#635bff]')]),
+        VEVA.dom.el('p', { class: 'italic font-medium text-[13px]' }, ['El modulo "' + viewId + '" se encuentra en desarrollo.'])
+      ]));
+      return;
+    }
+    view.render(mount);
+  }
+  return { go: go };
+})();
+
+// ---------------------------------------------------------------------------
+// Menu / sidebar - equivalente a NavSection + NavItem del prototipo React
+// (App, _source/Index.jsx linea ~3589), aqui como datos (no componentes).
+// Solo incluye los ids ya migrados; ampliar este arreglo al migrar mas vistas.
+// ---------------------------------------------------------------------------
+VEVA.MENU = [
+  { id: 'tesoreria', label: 'TESORERIA', items: [
+    { id: 'posicion', label: 'Posicion Bancaria', icon: 'building-2' },
+    { id: 'cobranza', label: 'Cobranza', icon: 'trending-up' },
+    { id: 'reporte-fechas', label: 'Reporte por Fechas', icon: 'calendar' },
+    { id: 'carga-mov', label: 'Carga Mov/Saldos', icon: 'upload-cloud' },
+    { id: 'clasificador', label: 'Clasificador', icon: 'tag' },
+    { id: 'conciliacion', label: 'Conciliacion Mensual', icon: 'check-circle' },
+    { id: 'validacion', label: 'Validacion de Saldos', icon: 'scale' },
+    { id: 'flujo-efectivo', label: 'Flujo de Efectivo', icon: 'activity' },
+    { id: 'workflow-pagos', label: 'Propuestas de Pago', icon: 'credit-card' },
+    { id: 'historico-pagos', label: 'Histórico de Pagos', icon: 'history' }
+  ]},
+  { id: 'activos', label: 'ACTIVOS', items: [
+    { id: 'solicitud', label: 'Nueva Solicitud AF', icon: 'file-plus' }
+  ]},
+  { id: 'admin', label: 'ADMINISTRACION', items: [
+    { id: 'admin-flujo', label: 'Configuracion Flujo', icon: 'sliders' },
+    { id: 'lista-dist', label: 'Lista de Distribucion', icon: 'mail' },
+    { id: 'notificaciones-pagos', label: 'Notificaciones de Pagos', icon: 'send' }
+  ]}
+];
+
+function vevaBuildSidebar() {
+  var nav = document.getElementById('veva-sidebar-nav');
+  VEVA.dom.clear(nav);
+  VEVA.MENU.forEach(function (section) {
+    nav.appendChild(VEVA.dom.el('div', { class: 'px-4 mt-4 mb-2 text-[10px] font-bold text-[#697386] uppercase tracking-widest' }, [section.label]));
+    section.items.forEach(function (item) {
+      nav.appendChild(VEVA.dom.el('button', {
+        class: 'w-full flex items-center gap-3 px-4 py-2 rounded-xl text-[13px] font-medium transition-all text-[#424770] hover:bg-[#f6f9fc]',
+        'data-nav': item.id,
+        onClick: function () { VEVA.router.go(item.id); }
+      }, [VEVA.icon(item.icon, 16, 'text-[#697386]'), item.label]));
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Toggle de sidebar - equivalente a sidebarOpen/setSidebarOpen del App
+// original (_source/Index.jsx:3579, 3634). Colapsa a w-0 igual que alla.
+// ---------------------------------------------------------------------------
+function vevaSetupHeader() {
+  var toggleBtn = document.getElementById('veva-menu-toggle');
+  var avatar = document.getElementById('veva-user-avatar');
+  if (toggleBtn) toggleBtn.appendChild(VEVA.icon('menu', 18));
+  if (avatar) avatar.appendChild(VEVA.icon('user', 20));
+
+  var sidebar = document.getElementById('veva-sidebar');
+  var open = true;
+  if (toggleBtn && sidebar) {
+    toggleBtn.addEventListener('click', function () {
+      open = !open;
+      sidebar.classList.toggle('w-64', open);
+      sidebar.classList.toggle('w-0', !open);
+    });
+  }
+
+  vevaCargarUsuarioHeader();
+}
+
+/** Header real de sesion (2026-07-27, hallazgo del usuario): antes
+ * mostraba "Usuario Demo"/"Administrador" fijo sin importar quien
+ * entrara -- cero confirmacion visual de que Google identifico a la
+ * persona real, aunque el backend SI capturaba correctamente el email
+ * real via Session.getActiveUser().getEmail() en toda la auditoria
+ * (Svc_Pagos.js). Session.getActiveUser() en Apps Script solo expone
+ * getEmail(), no un nombre para mostrar -- se usa el email como linea
+ * principal (siempre disponible para cualquier usuario del dominio,
+ * la autenticacion real de Google ya ocurrio antes de que esta pagina
+ * cargue, `access:"DOMAIN"` en appsscript.json la hace obligatoria) y
+ * el/los rol(es) de CAT_USUARIOS como segunda linea si la persona esta
+ * registrada ahi (ese catalogo es especifico del modulo de Pagos, no
+ * todos los usuarios del resto de TESO lo estan). getUsuarioActual ya
+ * existe en Svc_Pagos.js pero es una funcion global de Apps Script
+ * (visible desde cualquier .gs del mismo proyecto), reusarla aqui no
+ * es un acoplamiento nuevo. Si la llamada falla (o responde sin exito),
+ * se reemplaza el texto por "Sesión no identificada" y se deja rastro en
+ * `console.error` -- header no critico, nunca bloquea el resto de la
+ * app, pero tampoco se queda en silencio ni colgado en "Cargando..."
+ * para siempre (hallazgo real del revisor, 2 rondas). */
+function vevaCargarUsuarioHeader() {
+  var nombreEl = document.getElementById('veva-user-name');
+  var rolEl = document.getElementById('veva-user-role');
+  if (!nombreEl || !rolEl) return;
+  VEVA.gas('getUsuarioActual')
+    .then(function (res) {
+      if (!res || res.status !== 'success' || !res.data || !res.data.email) {
+        console.error('getUsuarioActual no devolvio un email valido:', res);
+        nombreEl.textContent = 'Sesión no identificada';
+        return;
+      }
+      nombreEl.textContent = res.data.email;
+      rolEl.textContent = (res.data.roles && res.data.roles.length) ? res.data.roles.join(' · ') : 'Sin rol asignado';
+    })
+    // Hallazgo real del revisor: el header es decorativo/no critico (nunca
+    // debe bloquear el resto de la app si falla), pero eso no es lo mismo
+    // que silenciar el error por completo -- console.error() deja rastro
+    // depurable de una falla real (permisos, hoja movida, etc.) sin
+    // interrumpir al usuario con un banner por algo no critico.
+    .catch(function (e) {
+      console.error('vevaCargarUsuarioHeader fallo:', e);
+      nombreEl.textContent = 'Sesión no identificada';
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  vevaSetupHeader();
+  vevaBuildSidebar();
+  VEVA.router.go('posicion');
+});
+</script>

@@ -1,0 +1,120 @@
+<script>
+/**
+ * VEVA - Vista: Nueva Solicitud de Activo Fijo.
+ * Responsabilidad unica: formulario simple que llama a saveAssetRequest.
+ * Puerto directo de NuevaSolicitudAF (_source/Index.jsx:608).
+ *
+ * Backend citado: saveAssetRequest (TESO_src/backend/Codigo.js). En VEVA
+ * (Codigo.gs:3139) esta funcion usaba SpreadsheetApp.getActiveSpreadsheet()
+ * -- invalido en un proyecto standalone, siempre fallaba. En TESO se
+ * corrigio a SpreadsheetApp.openById(SALDOS_SHEET_ID), igual que el resto
+ * del backend (ver PROMPT_MIGRACION_VEVA seccion 0).
+ *
+ * Diferencia intencional vs el React original: el original no mostraba
+ * ningun error si `res.success` era false (silencioso). Aqui si se pinta
+ * un error, por regla 2.2 de la guia (todo VEVA.gas lleva manejo de error
+ * visible, nunca se silencia).
+ */
+(function () {
+  function initialForm() {
+    return { tipo: 'Alta PEP', sociedad: 'Alfa Inmobiliaria', monto: '', moneda: 'MXN', descripcion: '', justificacion: '' };
+  }
+
+  var state = { loading: false, success: null, error: null, form: initialForm() };
+  var successTimer = null;
+
+  function submit() {
+    state.loading = true; state.error = null; redraw();
+    VEVA.gas('saveAssetRequest', state.form)
+      .then(function (res) {
+        if (res.success) {
+          state.success = res.folio;
+          state.form = initialForm();
+          if (successTimer) clearTimeout(successTimer);
+          successTimer = setTimeout(function () { state.success = null; redraw(); }, 5000);
+        } else {
+          state.error = res.error || 'No se pudo guardar la solicitud';
+        }
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function campoSelect(label, key, opciones) {
+    var sel = VEVA.dom.el('select', { class: 'w-full px-4 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[14px] outline-none focus:ring-2 focus:ring-[#635bff]/10 focus:border-[#635bff] transition-all' },
+      opciones.map(function (o) { return VEVA.dom.el('option', {}, [o]); }));
+    sel.value = state.form[key];
+    sel.addEventListener('change', function (e) { state.form[key] = e.target.value; });
+    return VEVA.dom.el('div', { class: 'space-y-2' }, [VEVA.dom.el('label', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, [label]), sel]);
+  }
+
+  function campoInput(label, key, type, placeholder) {
+    var input = VEVA.dom.el('input', { type: type, required: 'required', placeholder: placeholder, class: 'w-full px-4 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[14px] outline-none focus:ring-2 focus:ring-[#635bff]/10 focus:border-[#635bff] transition-all' }, []);
+    input.value = state.form[key];
+    input.addEventListener('input', function (e) { state.form[key] = e.target.value; });
+    return VEVA.dom.el('div', { class: 'space-y-2' }, [VEVA.dom.el('label', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, [label]), input]);
+  }
+
+  function campoTextarea(label, key, placeholder) {
+    var ta = VEVA.dom.el('textarea', { rows: '3', required: 'required', placeholder: placeholder, class: 'w-full px-4 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[14px] outline-none focus:ring-2 focus:ring-[#635bff]/10 focus:border-[#635bff] transition-all' }, []);
+    ta.value = state.form[key];
+    ta.addEventListener('input', function (e) { state.form[key] = e.target.value; });
+    return VEVA.dom.el('div', { class: 'space-y-2' }, [VEVA.dom.el('label', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, [label]), ta]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-solicitud-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var formChildren = [];
+    if (state.success) {
+      formChildren.push(VEVA.dom.el('div', { class: 'bg-emerald-50 border border-emerald-100 p-4 rounded-xl flex items-center gap-3 text-emerald-700' }, [
+        VEVA.icon('check-circle', 18, 'text-emerald-500'), VEVA.dom.el('p', { class: 'text-sm font-bold' }, ['Solicitud enviada. Folio: ' + state.success])
+      ]));
+    }
+    if (state.error) {
+      formChildren.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3 text-red-700' }, [
+        VEVA.icon('alert-circle', 18, 'text-red-500'), VEVA.dom.el('p', { class: 'text-sm font-bold' }, [state.error])
+      ]));
+    }
+
+    formChildren.push(VEVA.dom.el('div', { class: 'grid grid-cols-2 gap-6' }, [
+      campoSelect('Tipo de Movimiento', 'tipo', ['Alta PEP', 'Baja de Activo', 'Transferencia']),
+      campoSelect('Sociedad', 'sociedad', ['Alfa Inmobiliaria', 'Alfa Servicios', 'Alfa Energia'])
+    ]));
+    formChildren.push(VEVA.dom.el('div', { class: 'grid grid-cols-2 gap-6' }, [
+      campoInput('Monto Estimado', 'monto', 'number', '0.00'),
+      campoSelect('Moneda', 'moneda', ['MXN', 'USD', 'EUR'])
+    ]));
+    formChildren.push(campoInput('Descripcion del Activo', 'descripcion', 'text', 'Ej: Laptop Dell Latitude 5420'));
+    formChildren.push(campoTextarea('Justificacion', 'justificacion', 'Razon de la adquisicion o movimiento...'));
+
+    var btn = VEVA.dom.el('button', {
+      type: 'submit', disabled: state.loading ? 'disabled' : null,
+      class: 'w-full py-3 bg-[#635bff] text-white rounded-xl font-bold text-[15px] hover:bg-[#5851e5] transition-all shadow-md disabled:opacity-50 flex items-center justify-center gap-2'
+    }, [VEVA.icon(state.loading ? 'loader' : 'send', 16, state.loading ? 'animate-spin' : ''), state.loading ? 'Procesando...' : 'Enviar Solicitud al Sistema']);
+    formChildren.push(btn);
+
+    var form = VEVA.dom.el('form', { class: 'p-8 space-y-6' }, formChildren);
+    form.addEventListener('submit', function (e) { e.preventDefault(); submit(); });
+
+    var card = VEVA.dom.el('div', { class: 'bg-white rounded-2xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'p-8 border-b border-[#e6ebf1] bg-[#f6f9fc]/50' }, [
+        VEVA.dom.el('h2', { class: 'text-xl font-bold' }, ['Nueva Solicitud de Activo Fijo']),
+        VEVA.dom.el('p', { class: 'text-[14px] text-[#697386] mt-1' }, ['Completa el formulario para registro en sistema.'])
+      ]),
+      form
+    ]);
+    root.appendChild(VEVA.dom.el('div', { class: 'max-w-3xl mx-auto' }, [card]));
+  }
+
+  VEVA.registerView('solicitud', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-solicitud-root' }, []));
+      redraw();
+    },
+    destroy: function () { if (successTimer) clearTimeout(successTimer); }
+  });
+})();
+</script>

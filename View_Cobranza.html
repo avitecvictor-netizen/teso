@@ -1,0 +1,480 @@
+<script>
+/**
+ * VEVA - Vista: Cobranza.
+ * Responsabilidad unica: consultar getCobranza (backend/Codigo.gs:2501,
+ * sin modificar) y pintar KPIs + tabla con drill-down por sociedad/clasificacion.
+ * Puerto directo del componente React Cobranza (_source/Index.jsx linea 1561).
+ *
+ * Contrato de datos verificado contra backend/Codigo.gs::getCobranza:
+ *   { status: 'success'|'error', message: string,
+ *     data: { registros: [{ fecha, sociedad, banco, cuenta, descripcion,
+ *       abono, moneda, tc, abonoMxn, clasificacion, esCobranza, abrCobranza,
+ *       concepto, clienteCobranza, tipoMov }], total, porSociedad, tcUsd } }
+ *
+ * Notas / diferencias intencionales vs el React original:
+ * - El dropdown MultiSelect (VEVA.dom.multiSelect en Shared_Core.html) no
+ *   tiene estado propio: su apertura/cierre vive en state.openFilter y se
+ *   redibuja completo en cada cambio (igual que el resto de la vista), en
+ *   vez de mantener una instancia de componente persistente como en React.
+ *   Efecto practico: idem, se mantiene abierto entre checks porque
+ *   state.openFilter no se limpia al marcar una opcion, solo al elegir
+ *   "Todos", cambiar de filtro o hacer click fuera.
+ */
+(function () {
+  var CLASIF_LABEL = {
+    'COBRANZA':            'Operativos',
+    'OPERATIVOS':          'Operativos',
+    'Operativos':          'Operativos',
+    'PARTES_RELACIONADAS': 'Intercompanias',
+    'SIN_CLASIFICAR':      'Sin clasificar',
+    'INVERSION':           'Inversion',
+    'PRESTAMOS':           'Prestamos',
+    'OTROS':               'Otros',
+    'TRASPASOS_INTERNOS':  'Traspasos',
+    'INTERCIAS':           'Intercias'
+  };
+  var TIPO_BADGE = {
+    'SPEI':          { bg: 'bg-blue-50',    text: 'text-blue-700'    },
+    'TPV':           { bg: 'bg-violet-50',  text: 'text-violet-700'  },
+    'Efectivo':      { bg: 'bg-green-50',   text: 'text-green-700'   },
+    'Transferencia': { bg: 'bg-amber-50',   text: 'text-amber-700'   },
+    'Mix':           { bg: 'bg-gray-100',   text: 'text-gray-600'    },
+    'Otro':          { bg: 'bg-gray-50',    text: 'text-gray-500'    }
+  };
+  function mxnVal(r) { return r.abonoMxn || r.abono; }
+
+  var PERIODOS = [
+    { id: 'hoy',          label: 'Hoy' },
+    { id: 'sem-actual',   label: 'Sem. actual' },
+    { id: 'sem-anterior', label: 'Sem. anterior' },
+    { id: 'mes-actual',   label: 'Mes actual' },
+    { id: 'mes-anterior', label: 'Mes anterior' },
+    { id: 'rango',        label: 'Rango' }
+  ];
+
+  var state = {
+    loading: true, error: null, registros: [],
+    periodo: 'mes-actual', rangoDesde: '', rangoHasta: '',
+    soloCobranza: true,
+    filtSociedad: [], filtBanco: [], filtClasif: [], filtCuenta: [],
+    expanded: {}, openFilter: null
+  };
+
+  function getPeriodDates(p) {
+    var now = new Date(), y = now.getFullYear(), mo = now.getMonth(), dy = now.getDate();
+    if (p === 'mes-actual') {
+      return { desde: new Date(y, mo, 1).toISOString().slice(0, 10), hasta: new Date(y, mo + 1, 0).toISOString().slice(0, 10) };
+    }
+    if (p === 'sem-actual') {
+      var dow = now.getDay(), diffToMon = dow === 0 ? 6 : dow - 1;
+      var mon = new Date(y, mo, dy - diffToMon);
+      return { desde: mon.toISOString().slice(0, 10), hasta: new Date(y, mo, dy).toISOString().slice(0, 10) };
+    }
+    if (p === 'sem-anterior') {
+      var dow2 = now.getDay(), diffToMon2 = dow2 === 0 ? 6 : dow2 - 1;
+      var thisMon = new Date(y, mo, dy - diffToMon2);
+      var lastMon = new Date(thisMon.getTime() - 7 * 86400000);
+      var lastSun = new Date(thisMon.getTime() - 86400000);
+      return { desde: lastMon.toISOString().slice(0, 10), hasta: lastSun.toISOString().slice(0, 10) };
+    }
+    if (p === 'mes-anterior') {
+      return { desde: new Date(y, mo - 1, 1).toISOString().slice(0, 10), hasta: new Date(y, mo, 0).toISOString().slice(0, 10) };
+    }
+    return { desde: null, hasta: null };
+  }
+
+  function cargar(p, solo, dDesde, dHasta) {
+    state.loading = true; state.error = null; redraw();
+    var sc = solo !== undefined ? solo : state.soloCobranza;
+    var params = { soloCobranza: sc };
+    if (p === 'hoy') {
+      params.hoy = true;
+    } else if (p === 'rango') {
+      params.desde = dDesde || state.rangoDesde;
+      params.hasta = dHasta || state.rangoHasta;
+    } else {
+      var dates = getPeriodDates(p);
+      params.desde = dates.desde; params.hasta = dates.hasta;
+    }
+    VEVA.gas('getCobranza', params)
+      .then(function (res) {
+        if (res.status !== 'success') throw new Error(res.message || 'Error al cargar cobranza');
+        state.registros = res.data.registros || [];
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function handlePeriodo(p) {
+    state.periodo = p; state.expanded = {};
+    state.filtSociedad = []; state.filtBanco = []; state.filtClasif = []; state.filtCuenta = [];
+    if (p !== 'rango') cargar(p);
+    else redraw();
+  }
+
+  function handleToggleSolo(val) { state.soloCobranza = val; cargar(state.periodo, val); }
+  function toggleRow(k) { state.expanded[k] = !state.expanded[k]; redraw(); }
+  function toggleFilter(key) { state.openFilter = state.openFilter === key ? null : key; redraw(); }
+  function limpiarFiltros() {
+    state.filtSociedad = []; state.filtBanco = []; state.filtClasif = []; state.filtCuenta = [];
+    redraw();
+  }
+
+  function agruparPorClasif(cuentas) {
+    var map = {}, orden = [];
+    cuentas.forEach(function (r) {
+      var ck = r.clasificacion || 'SIN_CLASIFICAR';
+      if (!map[ck]) { map[ck] = []; orden.push(ck); }
+      map[ck].push(r);
+    });
+    orden.sort(function (a, b) {
+      var ao = (a.toUpperCase() === 'COBRANZA' || a.toUpperCase().indexOf('OPERAT') >= 0) ? 0 : 1;
+      var bo = (b.toUpperCase() === 'COBRANZA' || b.toUpperCase().indexOf('OPERAT') >= 0) ? 0 : 1;
+      return ao - bo;
+    });
+    return orden.map(function (k) { return { key: k, movs: map[k] }; });
+  }
+
+  // --- Derivados a partir de state.registros + filtros (recalculados en cada redraw, sin memo: KISS) ---
+  function computeDerived() {
+    var registros = state.registros;
+    var uniq = function (arr) { return arr.filter(function (v, i) { return arr.indexOf(v) === i; }).sort(); };
+    var d = {};
+    d.opcSociedades = uniq(registros.map(function (r) { return r.sociedad; }));
+    d.opcBancos     = uniq(registros.map(function (r) { return r.banco; }));
+    d.opcClasif     = uniq(registros.map(function (r) { return r.clasificacion; }));
+    d.opcCuentas    = uniq(registros.map(function (r) { return '*' + r.cuenta.slice(-4); }));
+
+    d.filtrados = registros.filter(function (r) {
+      return (state.filtSociedad.length === 0 || state.filtSociedad.indexOf(r.sociedad) >= 0) &&
+        (state.filtBanco.length === 0 || state.filtBanco.indexOf(r.banco) >= 0) &&
+        (state.filtClasif.length === 0 || state.filtClasif.indexOf(r.clasificacion) >= 0) &&
+        (state.filtCuenta.length === 0 || state.filtCuenta.indexOf('*' + r.cuenta.slice(-4)) >= 0);
+    });
+
+    var sum = function (arr, fn) { return arr.reduce(function (a, r) { return a + fn(r); }, 0); };
+
+    d.totalMxn   = sum(d.filtrados, mxnVal);
+    d.totalNac   = sum(d.filtrados.filter(function (r) { return !r.moneda || r.moneda === 'MXN'; }), function (r) { return r.abono; });
+    d.totalExt   = sum(d.filtrados.filter(function (r) { return r.moneda && r.moneda !== 'MXN'; }), function (r) { return r.abono; });
+    d.operativos = d.filtrados.filter(function (r) { return r.esCobranza; });
+    d.noOps      = d.filtrados.filter(function (r) { return !r.esCobranza; });
+    d.totalOperativos = sum(d.operativos, mxnVal);
+    d.countOperativos = d.operativos.length;
+    d.totalNoOps = sum(d.noOps, mxnVal);
+
+    d.resumenTipo = ['SPEI', 'TPV', 'Efectivo', 'Transferencia', 'Otro'].map(function (t) {
+      var movs = d.operativos.filter(function (r) { return r.tipoMov === t; });
+      return movs.length ? { tipo: t, total: sum(movs, mxnVal), count: movs.length } : null;
+    }).filter(Boolean);
+
+    var movsCli = d.operativos.filter(function (r) { return r.clienteCobranza && r.clienteCobranza.trim(); });
+    d.resumenClientes = { total: sum(movsCli, mxnVal), count: movsCli.length };
+
+    var noOpsMap = {}, noOpsOrder = [];
+    d.noOps.forEach(function (r) {
+      var ck = r.clasificacion || 'SIN_CLASIFICAR';
+      if (!noOpsMap[ck]) { noOpsMap[ck] = { total: 0, count: 0 }; noOpsOrder.push(ck); }
+      noOpsMap[ck].total += mxnVal(r); noOpsMap[ck].count += 1;
+    });
+    d.resumenNoOps = noOpsOrder.map(function (k) { return { key: k, label: CLASIF_LABEL[k] || k, total: noOpsMap[k].total, count: noOpsMap[k].count }; });
+
+    var socMap = {}, socOrder = [];
+    d.filtrados.forEach(function (r) {
+      var abr = r.abrCobranza || r.sociedad.substring(0, 3).toUpperCase();
+      var k = abr + '|' + r.sociedad;
+      if (!socMap[k]) { socMap[k] = { abr: abr, sociedad: r.sociedad, cuentas: [] }; socOrder.push(k); }
+      socMap[k].cuentas.push(r);
+    });
+    d.porSociedad = socOrder.map(function (k) { return socMap[k]; }).sort(function (a, b) {
+      return sum(b.cuentas, mxnVal) - sum(a.cuentas, mxnVal);
+    });
+
+    return d;
+  }
+
+  function renderFiltros(d) {
+    var periodoBtns = PERIODOS.map(function (p) {
+      var active = state.periodo === p.id;
+      return VEVA.dom.el('button', {
+        class: 'px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all ' +
+          (active ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1]') +
+          (state.loading ? ' opacity-50 pointer-events-none' : ''),
+        onClick: function () { handlePeriodo(p.id); }
+      }, [p.label]);
+    });
+
+    var rangoRow = null;
+    if (state.periodo === 'rango') {
+      var inDesde = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 bg-white outline-none' }, []);
+      inDesde.value = state.rangoDesde;
+      inDesde.addEventListener('change', function (e) { state.rangoDesde = e.target.value; });
+      var inHasta = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 bg-white outline-none' }, []);
+      inHasta.value = state.rangoHasta;
+      inHasta.addEventListener('change', function (e) { state.rangoHasta = e.target.value; });
+      rangoRow = VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        inDesde, VEVA.dom.el('span', { class: 'text-[12px] text-[#697386]' }, ['—']), inHasta,
+        VEVA.dom.el('button', {
+          class: 'px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium',
+          onClick: function () { cargar('rango'); }
+        }, ['Aplicar'])
+      ]);
+    }
+
+    var soloToggle = VEVA.dom.el('div', { class: 'flex items-center gap-1.5 ml-auto' }, [
+      VEVA.dom.el('button', {
+        class: 'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ' + (state.soloCobranza ? 'bg-emerald-600 text-white' : 'bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1]'),
+        onClick: function () { handleToggleSolo(true); }
+      }, ['Solo cobranza']),
+      VEVA.dom.el('button', {
+        class: 'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ' + (!state.soloCobranza ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1]'),
+        onClick: function () { handleToggleSolo(false); }
+      }, ['Todos ingresos'])
+    ]);
+
+    var fila1 = VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-3' }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-1 flex-wrap' }, periodoBtns), rangoRow, soloToggle
+    ]);
+
+    var hayFiltros = state.filtSociedad.length + state.filtBanco.length + state.filtClasif.length + state.filtCuenta.length > 0;
+    var fila2Items = [
+      VEVA.dom.multiSelect({ options: d.opcSociedades, value: state.filtSociedad, placeholder: 'Sociedad', isOpen: state.openFilter === 'sociedad', onToggleOpen: function () { toggleFilter('sociedad'); }, onChange: function (v) { state.filtSociedad = v; redraw(); } }),
+      VEVA.dom.multiSelect({ options: d.opcBancos, value: state.filtBanco, placeholder: 'Banco', isOpen: state.openFilter === 'banco', onToggleOpen: function () { toggleFilter('banco'); }, onChange: function (v) { state.filtBanco = v; redraw(); } }),
+      VEVA.dom.multiSelect({ options: d.opcClasif, value: state.filtClasif, placeholder: 'Clasificacion', isOpen: state.openFilter === 'clasif', onToggleOpen: function () { toggleFilter('clasif'); }, onChange: function (v) { state.filtClasif = v; redraw(); } }),
+      VEVA.dom.multiSelect({ options: d.opcCuentas, value: state.filtCuenta, placeholder: 'Cuenta', isOpen: state.openFilter === 'cuenta', onToggleOpen: function () { toggleFilter('cuenta'); }, onChange: function (v) { state.filtCuenta = v; redraw(); } })
+    ];
+    if (hayFiltros) {
+      fila2Items.push(VEVA.dom.el('button', {
+        class: 'text-[11px] text-[#697386] hover:text-red-500 underline transition-colors',
+        onClick: limpiarFiltros
+      }, ['Limpiar']));
+    }
+    var fila2 = VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-3' }, fila2Items);
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4 space-y-3' }, [fila1, fila2]);
+  }
+
+  function renderKpis(d) {
+    var card = function (label, value, cls) {
+      return VEVA.dom.el('div', { class: 'bg-white p-5 rounded-xl border border-[#e6ebf1] shadow-sm' }, [
+        VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider mb-1' }, [label]),
+        VEVA.dom.el('p', { class: cls }, [value])
+      ]);
+    };
+    return VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-4' }, [
+      card('Total Cobranza', VEVA.fmt.mxn(d.totalOperativos), 'text-2xl font-bold text-[#635bff]'),
+      card('Moneda Nacional', VEVA.fmt.mxn(d.totalNac), 'text-xl font-bold text-[#0a2540]'),
+      card('Moneda Extranjera', VEVA.fmt.mxn(d.totalExt), 'text-xl font-bold text-[#0a2540]'),
+      card('Num. Registros', String(d.filtrados.length), 'text-2xl font-bold text-emerald-600')
+    ]);
+  }
+
+  function renderBancos(d) {
+    if (!d.opcBancos.length) return null;
+    var cards = d.opcBancos.map(function (banco) {
+      var total = d.filtrados.filter(function (r) { return r.banco === banco; }).reduce(function (a, r) { return a + mxnVal(r); }, 0);
+      return VEVA.dom.el('div', { class: 'bg-white p-4 rounded-xl border border-[#e6ebf1] shadow-sm' }, [
+        VEVA.dom.el('div', { class: 'flex items-center gap-2 mb-2' }, [
+          VEVA.dom.el('div', { class: 'w-6 h-6 rounded bg-[#635bff]/10 text-[#635bff] flex items-center justify-center text-[10px] font-bold' }, [banco.substring(0, 2).toUpperCase()]),
+          VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase' }, [banco])
+        ]),
+        VEVA.dom.el('p', { class: 'text-[15px] font-bold text-[#0a2540]' }, [VEVA.fmt.mxn(total)])
+      ]);
+    });
+    return VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-3' }, cards);
+  }
+
+  function renderResumen(d) {
+    if (!d.filtrados.length) return null;
+    var items = [];
+    if (d.resumenClientes.count > 0) {
+      items.push(VEVA.dom.el('div', { class: 'flex flex-col gap-0.5 min-w-[90px]' }, [
+        VEVA.dom.el('span', { class: 'text-[10px] font-bold text-emerald-700 uppercase tracking-wide' }, ['Clientes']),
+        VEVA.dom.el('span', { class: 'text-[14px] font-bold text-[#0a2540]' }, [VEVA.fmt.mxn(d.resumenClientes.total)]),
+        VEVA.dom.el('span', { class: 'text-[10px] text-[#697386]' }, [d.resumenClientes.count + ' movs'])
+      ]));
+    }
+    d.resumenTipo.forEach(function (rt) {
+      var s = TIPO_BADGE[rt.tipo] || TIPO_BADGE['Otro'];
+      items.push(VEVA.dom.el('div', { class: 'flex flex-col gap-0.5 min-w-[90px]' }, [
+        VEVA.dom.el('span', { class: 'text-[10px] font-bold uppercase tracking-wide ' + s.text }, [rt.tipo]),
+        VEVA.dom.el('span', { class: 'text-[14px] font-bold text-[#0a2540]' }, [VEVA.fmt.mxn(rt.total)]),
+        VEVA.dom.el('span', { class: 'text-[10px] text-[#697386]' }, [rt.count + ' movs'])
+      ]));
+    });
+    if (d.resumenNoOps.length) {
+      var subItems = d.resumenNoOps.map(function (g) {
+        return VEVA.dom.el('div', { class: 'flex flex-col gap-0' }, [
+          VEVA.dom.el('span', { class: 'text-[10px] text-[#697386]' }, [g.label]),
+          VEVA.dom.el('span', { class: 'text-[11px] font-semibold text-[#697386]' }, [VEVA.fmt.mxn(g.total) + ' (' + g.count + ')'])
+        ]);
+      });
+      items.push(VEVA.dom.el('div', { class: 'flex flex-col gap-0.5 pl-4 border-l border-[#e6ebf1] ml-2' }, [
+        VEVA.dom.el('span', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wide' }, ['No operativos']),
+        VEVA.dom.el('span', { class: 'text-[14px] font-bold text-[#697386]' }, [VEVA.fmt.mxn(d.totalNoOps)]),
+        VEVA.dom.el('div', { class: 'flex flex-wrap gap-3 mt-1' }, subItems)
+      ]));
+    }
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4' }, [
+      VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-widest mb-3' }, ['Resumen · Operativos por tipo']),
+      VEVA.dom.el('div', { class: 'flex flex-wrap gap-4' }, items)
+    ]);
+  }
+
+  function renderMovRow(r) {
+    var bs = TIPO_BADGE[r.tipoMov] || TIPO_BADGE['Otro'];
+    var importe = (r.moneda && r.moneda !== 'MXN')
+      ? VEVA.dom.el('div', {}, [
+          VEVA.dom.el('span', { class: 'text-blue-600' }, [r.moneda + ' ' + r.abono.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+          VEVA.dom.el('div', { class: 'text-[11px] text-emerald-700' }, [(r.abonoMxn || r.abono).toLocaleString('es-MX', { minimumFractionDigits: 2 })])
+        ])
+      : r.abono.toLocaleString('es-MX', { minimumFractionDigits: 2 });
+    return VEVA.dom.el('tr', { class: 'border-b border-[#f6f9fc] bg-[#f6f9fc]/30' }, [
+      VEVA.dom.el('td', { class: 'px-3 py-2' }, []),
+      VEVA.dom.el('td', { class: 'px-3 py-2 pl-14 text-[11px] text-[#697386] max-w-[80px] truncate' }, [r.sociedad]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-[11px] text-[#697386]' }, [r.banco + ' *' + r.cuenta.slice(-4)]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-[10px] text-emerald-700 truncate max-w-[150px]' }, [r.clienteCobranza || r.descripcion || '']),
+      VEVA.dom.el('td', { class: 'px-3 py-2' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold px-1.5 py-0.5 rounded ' + bs.bg + ' ' + bs.text }, [r.tipoMov])]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-right font-mono text-[12px]' }, [importe]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-center text-[11px] text-[#697386]' }, ['—']),
+      VEVA.dom.el('td', { class: 'px-3 py-2' }, [])
+    ]);
+  }
+
+  function renderGrupoClasif(g) {
+    var esOp = g.key.toUpperCase() === 'COBRANZA' || g.key.toUpperCase().indexOf('OPERAT') >= 0;
+    var label = CLASIF_LABEL[g.key] || g.key;
+    var subtotal = g.movs.reduce(function (a, r) { return a + (r.abonoMxn || r.abono); }, 0);
+    var rows = [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { class: 'px-3 py-1.5' }, []),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 pl-10' }, [
+        VEVA.dom.el('span', { class: 'text-[11px] font-bold ' + (esOp ? 'text-emerald-700' : 'text-[#697386]') }, [label]),
+        VEVA.dom.el('span', { class: 'text-[10px] text-[#697386] ml-2' }, [g.movs.length + ' mov' + (g.movs.length !== 1 ? 's' : '')])
+      ]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 text-right font-mono text-[11px] font-semibold' }, [subtotal.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 text-center text-[10px] text-[#697386]' }, ['—']),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 text-right text-[10px] text-[#697386]' }, [String(g.movs.length)])
+    ])];
+    g.movs.forEach(function (r) { rows.push(renderMovRow(r)); });
+    return rows;
+  }
+
+  function renderFilaSociedad(soc) {
+    var k = soc.abr + '|' + soc.sociedad;
+    var isOpen = !!state.expanded[k];
+    var totalSoc = soc.cuentas.reduce(function (a, r) { return a + mxnVal(r); }, 0);
+    var totalSocUsd = soc.cuentas.filter(function (r) { return r.moneda && r.moneda !== 'MXN'; }).reduce(function (a, r) { return a + r.abono; }, 0);
+    var bancos = []; soc.cuentas.forEach(function (r) { if (bancos.indexOf(r.banco) < 0) bancos.push(r.banco); });
+    var mainBanco = bancos.length === 1 ? bancos[0] : 'Varios';
+    var tipos = []; soc.cuentas.forEach(function (r) { if (r.tipoMov && tipos.indexOf(r.tipoMov) < 0) tipos.push(r.tipoMov); });
+    var tipoDisplay = tipos.length === 1 ? tipos[0] : 'Mix';
+    var tbs = TIPO_BADGE[tipoDisplay] || TIPO_BADGE['Otro'];
+
+    var filaResumen = VEVA.dom.el('tr', { class: 'border-b border-[#f6f9fc] cursor-pointer hover:bg-[#f6f9fc]/70 transition-colors', onClick: function () { toggleRow(k); } }, [
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-center' }, [VEVA.icon(isOpen ? 'chevron-down' : 'chevron-right', 12, 'text-[#697386]')]),
+      VEVA.dom.el('td', { class: 'px-3 py-3' }, [
+        VEVA.dom.el('span', { class: 'px-2 py-0.5 bg-[#635bff]/10 text-[#635bff] text-[10px] font-bold rounded' }, [soc.abr]),
+        VEVA.dom.el('span', { class: 'text-[12px] font-medium text-[#0a2540] ml-2' }, [soc.sociedad])
+      ]),
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-[12px] text-[#697386]' }, [mainBanco]),
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-[11px] text-[#697386] italic' }, ['— ver detalle —']),
+      VEVA.dom.el('td', { class: 'px-3 py-3' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold px-2 py-0.5 rounded-full ' + tbs.bg + ' ' + tbs.text }, [tipoDisplay])]),
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-right font-mono font-bold text-[13px]' }, [totalSoc.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-right font-mono text-[11px] text-blue-600' }, [totalSocUsd > 0 ? totalSocUsd.toLocaleString('es-MX', { minimumFractionDigits: 2 }) + ' USD' : '—']),
+      VEVA.dom.el('td', { class: 'px-3 py-3 text-right text-[#697386] font-mono text-[12px]' }, [String(soc.cuentas.length)])
+    ]);
+
+    var out = [filaResumen];
+    if (isOpen) {
+      agruparPorClasif(soc.cuentas).forEach(function (g) { out = out.concat(renderGrupoClasif(g)); });
+    }
+    return out;
+  }
+
+  function renderTabla(d) {
+    var body = document.createDocumentFragment();
+    if (!d.porSociedad.length) {
+      return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+        VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-widest' }, ['Detalle por Sociedad'])]),
+        VEVA.dom.el('div', { class: 'px-6 py-10 text-center text-[13px] text-[#697386]' }, ['Sin registros de cobranza para el periodo seleccionado'])
+      ]);
+    }
+    var rows = [];
+    d.porSociedad.forEach(function (soc) { rows = rows.concat(renderFilaSociedad(soc)); });
+    rows.push(VEVA.dom.el('tr', { class: 'border-t-2 border-[#635bff]/20 bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { colspan: '5', class: 'px-6 py-2.5' }, [VEVA.dom.el('span', { class: 'text-[11px] font-bold text-emerald-700' }, ['Total operativos · coincide con KPI superior'])]),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-right font-mono font-bold text-[12px] text-emerald-700' }, [d.totalOperativos.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-center text-[11px] text-[#697386]' }, ['—']),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-right text-[11px] font-bold text-emerald-700' }, [String(d.countOperativos)])
+    ]));
+    rows.push(VEVA.dom.el('tr', { class: 'border-t border-[#e6ebf1] bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { colspan: '5', class: 'px-6 py-2.5' }, [VEVA.dom.el('span', { class: 'text-[11px] font-bold text-[#0a2540]' }, ['Gran total · todos los movimientos'])]),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-right font-mono font-bold text-[12px]' }, [d.totalMxn.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-right font-mono text-[11px] text-blue-600' }, [d.totalExt > 0 ? d.totalExt.toLocaleString('es-MX', { minimumFractionDigits: 2 }) + ' USD' : '—']),
+      VEVA.dom.el('td', { class: 'px-3 py-2.5 text-right text-[11px] font-bold' }, [String(d.filtrados.length)])
+    ]));
+
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+      VEVA.dom.el('th', { class: 'px-3 py-2 w-8' }, []),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Sociedad']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Banco']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Contraparte']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Tipo']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-right text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['MXN']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-right text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['USD']),
+      VEVA.dom.el('th', { class: 'px-3 py-2 text-right text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['#'])
+    ])]);
+    var table = VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', {}, rows)]);
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-widest' }, ['Detalle por Sociedad'])]),
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [table])
+    ]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-cobranza-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Cobranza']),
+      state.error
+        ? VEVA.dom.el('p', { class: 'text-[13px] text-red-500 mt-0.5' }, [state.error])
+        : VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Movimientos clasificados como cobranza'])
+    ]));
+
+    var d = computeDerived();
+    root.appendChild(renderFiltros(d));
+
+    if (state.loading) {
+      var skel = [0, 1, 2, 3].map(function () { return VEVA.dom.el('div', { class: 'h-24 bg-[#e6ebf1] rounded-xl animate-pulse' }, []); });
+      root.appendChild(VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-4 mt-6' }, skel));
+      return;
+    }
+
+    var wrap = VEVA.dom.el('div', { class: 'space-y-6 mt-6' }, []);
+    wrap.appendChild(renderKpis(d));
+    var bancos = renderBancos(d); if (bancos) wrap.appendChild(bancos);
+    var resumen = renderResumen(d); if (resumen) wrap.appendChild(resumen);
+    wrap.appendChild(renderTabla(d));
+    root.appendChild(wrap);
+  }
+
+  function onDocClick(e) {
+    if (!state.openFilter) return;
+    if (e.target.closest && e.target.closest('[data-multiselect]')) return;
+    state.openFilter = null;
+    redraw();
+  }
+
+  VEVA.registerView('cobranza', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-cobranza-root' }, []));
+      document.addEventListener('click', onDocClick);
+      cargar(state.periodo);
+    },
+    destroy: function () { document.removeEventListener('click', onDocClick); }
+  });
+})();
+</script>

@@ -1,0 +1,264 @@
+<script>
+/**
+ * VEVA - Vista: Clasificador de Movimientos.
+ * Responsabilidad unica: listar movimientos paginados (getMovimientos,
+ * backend/Codigo.gs:2105) y guardar reclasificaciones (clasificarMovimientos,
+ * backend/Codigo.gs:2213). Puerto directo de ClasificadorMovimientos
+ * (_source/Index.jsx:2567).
+ *
+ * Contrato de datos verificado:
+ *   getMovimientos -> { data: { rows:[{idMov,fecha,sociedad,banco,cuenta,
+ *     descripcion,cargo,abono,tipo,clasificacion,contraparte,...}],
+ *     total, pagina, paginas, opciones:{sociedades,bancos,cuentas,clasificaciones} } }
+ *   clasificarMovimientos({items:[{idMov,clasificacion,subcategoria}]}) -> {status,message}
+ */
+(function () {
+  var hoy = new Date(), y = hoy.getFullYear(), m = hoy.getMonth();
+  var POR_PAGINA = 100;
+
+  var state = {
+    loading: true, saving: false, error: null, rows: [], total: 0, pagina: 1, paginas: 1,
+    desde: new Date(y, m, 1).toISOString().slice(0, 10),
+    hasta: new Date(y, m + 1, 0).toISOString().slice(0, 10),
+    filtSocList: [], filtBancoList: [], filtCuentaList: [], filtClasifList: [], filtTipo: '',
+    opSociedades: [], opBancos: [], opCuentas: [], opClasifs: [],
+    pendientes: {}, guardado: null, openFilter: null
+  };
+
+  function cargar(pg) {
+    state.loading = true; state.error = null; redraw();
+    var params = { desde: state.desde, hasta: state.hasta, pagina: pg || 1, porPagina: POR_PAGINA };
+    if (state.filtSocList.length)    params.sociedad = state.filtSocList;
+    if (state.filtBancoList.length)  params.banco = state.filtBancoList;
+    if (state.filtCuentaList.length) params.cuenta = state.filtCuentaList;
+    if (state.filtClasifList.length) params.clasificacion = state.filtClasifList;
+    if (state.filtTipo) params.tipo = state.filtTipo;
+    VEVA.gas('getMovimientos', params)
+      .then(function (res) {
+        if (res.status !== 'success') throw new Error(res.message || 'Error al cargar movimientos');
+        state.rows = res.data.rows || [];
+        state.total = res.data.total || 0;
+        state.pagina = res.data.pagina || 1;
+        state.paginas = res.data.paginas || 1;
+        state.pendientes = {};
+        var op = res.data.opciones || {};
+        if (op.sociedades && op.sociedades.length) state.opSociedades = op.sociedades;
+        if (op.bancos && op.bancos.length) state.opBancos = op.bancos;
+        if (op.cuentas && op.cuentas.length) state.opCuentas = op.cuentas;
+        if (op.clasificaciones && op.clasificaciones.length) state.opClasifs = op.clasificaciones;
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function handleBuscar() { state.pendientes = {}; cargar(1); }
+  function limpiarFiltros() {
+    state.filtSocList = []; state.filtBancoList = []; state.filtCuentaList = []; state.filtClasifList = []; state.filtTipo = '';
+    redraw();
+  }
+  function toggleFilter(key) { state.openFilter = state.openFilter === key ? null : key; redraw(); }
+  function handleClasif(idMov, clasif) {
+    state.pendientes[idMov] = Object.assign({}, state.pendientes[idMov] || {}, { clasificacion: clasif });
+    redraw();
+  }
+
+  function guardar() {
+    var keys = Object.keys(state.pendientes);
+    if (!keys.length) return;
+    var items = keys.map(function (id) { return { idMov: id, clasificacion: state.pendientes[id].clasificacion || 'SIN_CLASIFICAR', subcategoria: '' }; });
+    state.saving = true; state.guardado = null; redraw();
+    VEVA.gas('clasificarMovimientos', { items: items })
+      .then(function (res) {
+        if (res.status === 'success') { state.guardado = { ok: true, msg: res.message || (items.length + ' registros guardados') }; cargar(state.pagina); }
+        else state.guardado = { ok: false, msg: res.message || 'Error al guardar' };
+      })
+      .catch(function (e) { state.guardado = { ok: false, msg: e.message || 'Error de conexion' }; })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function computeDerived() {
+    var d = {};
+    d.numPendientes = Object.keys(state.pendientes).length;
+    d.tiposOpciones = VEVA.TIPOS_LISTA.slice();
+    state.opClasifs.forEach(function (c) { if (c && d.tiposOpciones.indexOf(c) < 0) d.tiposOpciones.push(c); });
+    d.totalAbonos = state.rows.reduce(function (a, r) { return a + r.abono; }, 0);
+    d.totalCargos = state.rows.reduce(function (a, r) { return a + r.cargo; }, 0);
+    d.sinClasif = state.rows.filter(function (r) { return !r.clasificacion || r.clasificacion === 'SIN_CLASIFICAR'; }).length;
+
+    var map = {}, order = [];
+    state.rows.forEach(function (r) {
+      var k = r.clasificacion || 'SIN_CLASIFICAR';
+      if (!map[k]) { map[k] = { abonos: 0, cargos: 0, count: 0 }; order.push(k); }
+      map[k].abonos += r.abono; map[k].cargos += r.cargo; map[k].count++;
+    });
+    d.resumenTipo = order.map(function (k) { return { tipo: k, abonos: map[k].abonos, cargos: map[k].cargos, count: map[k].count }; })
+      .sort(function (a, b) { return (b.abonos + b.cargos) - (a.abonos + a.cargos); });
+    return d;
+  }
+
+  function renderFiltros(d) {
+    var campo = function (label, node) {
+      return VEVA.dom.el('div', {}, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider block mb-1' }, [label]), node]);
+    };
+    var inDesde = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, []);
+    inDesde.value = state.desde; inDesde.addEventListener('change', function (e) { state.desde = e.target.value; });
+    var inHasta = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, []);
+    inHasta.value = state.hasta; inHasta.addEventListener('change', function (e) { state.hasta = e.target.value; });
+
+    var selTipo = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, [
+      VEVA.dom.el('option', { value: '' }, ['Todos']),
+      VEVA.dom.el('option', { value: 'INGRESO' }, ['Ingreso']),
+      VEVA.dom.el('option', { value: 'EGRESO' }, ['Egreso']),
+      VEVA.dom.el('option', { value: 'REVISION' }, ['Revision'])
+    ]);
+    selTipo.value = state.filtTipo;
+    selTipo.addEventListener('change', function (e) { state.filtTipo = e.target.value; redraw(); });
+
+    var hayFiltros = state.filtSocList.length || state.filtBancoList.length || state.filtCuentaList.length || state.filtClasifList.length || state.filtTipo !== '';
+
+    var items = [
+      campo('Desde', inDesde), campo('Hasta', inHasta),
+      campo('Sociedad', VEVA.dom.multiSelect({ options: state.opSociedades, value: state.filtSocList, placeholder: 'Todas', isOpen: state.openFilter === 'soc', onToggleOpen: function () { toggleFilter('soc'); }, onChange: function (v) { state.filtSocList = v; redraw(); } })),
+      campo('Banco', VEVA.dom.multiSelect({ options: state.opBancos, value: state.filtBancoList, placeholder: 'Todos', isOpen: state.openFilter === 'banco', onToggleOpen: function () { toggleFilter('banco'); }, onChange: function (v) { state.filtBancoList = v; redraw(); } })),
+      campo('Cuenta', VEVA.dom.multiSelect({ options: state.opCuentas, value: state.filtCuentaList, placeholder: 'Todas', isOpen: state.openFilter === 'cuenta', onToggleOpen: function () { toggleFilter('cuenta'); }, onChange: function (v) { state.filtCuentaList = v; redraw(); } })),
+      campo('Clasificacion', VEVA.dom.multiSelect({ options: state.opClasifs, value: state.filtClasifList, placeholder: 'Todas', isOpen: state.openFilter === 'clasif', onToggleOpen: function () { toggleFilter('clasif'); }, onChange: function (v) { state.filtClasifList = v; redraw(); } })),
+      campo('Tipo', selTipo)
+    ];
+    if (hayFiltros) items.push(VEVA.dom.el('button', { class: 'text-[11px] text-[#697386] hover:text-red-500 underline transition-colors', onClick: limpiarFiltros }, ['Limpiar']));
+    items.push(VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-50', onClick: handleBuscar, disabled: state.loading ? 'disabled' : null }, [VEVA.icon('search', 12), 'Buscar']));
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4' }, [VEVA.dom.el('div', { class: 'flex flex-wrap items-end gap-3' }, items)]);
+  }
+
+  function renderKpis(d) {
+    var card = function (label, value, cls) {
+      return VEVA.dom.el('div', { class: 'bg-white p-4 rounded-xl border border-[#e6ebf1] shadow-sm' }, [
+        VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider mb-1' }, [label]),
+        VEVA.dom.el('p', { class: cls }, [value])
+      ]);
+    };
+    var totalCard = card('Total (pagina)', state.total.toLocaleString('es-MX'), 'text-xl font-bold text-[#635bff]');
+    totalCard.appendChild(VEVA.dom.el('p', { class: 'text-[10px] text-[#697386] mt-0.5' }, ['pg. ' + state.pagina + '/' + state.paginas]));
+    return VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-3' }, [
+      totalCard,
+      card('Abonos', VEVA.fmt.mxn(d.totalAbonos), 'text-xl font-bold text-emerald-600'),
+      card('Cargos', VEVA.fmt.mxn(d.totalCargos), 'text-xl font-bold text-red-500'),
+      card('Sin Clasificar', String(d.sinClasif), 'text-xl font-bold ' + (d.sinClasif > 0 ? 'text-amber-500' : 'text-emerald-600'))
+    ]);
+  }
+
+  function renderFilaMov(r, d) {
+    var isPendiente = !!state.pendientes[r.idMov];
+    var clasifActual = isPendiente ? state.pendientes[r.idMov].clasificacion : r.clasificacion;
+    var st = VEVA.tipoStyle(clasifActual);
+    var sel = VEVA.dom.el('select', { class: 'text-[10px] font-bold px-2 py-0.5 rounded-full border-0 outline-none cursor-pointer ' + st.bg + ' ' + st.text },
+      d.tiposOpciones.map(function (t) { return VEVA.dom.el('option', { value: t }, [VEVA.tipoStyle(t).label]); }));
+    sel.value = clasifActual || 'SIN_CLASIFICAR';
+    sel.addEventListener('change', function (e) { handleClasif(r.idMov, e.target.value); });
+
+    return VEVA.dom.el('tr', { class: 'border-b border-[#f6f9fc] transition-colors ' + (isPendiente ? 'bg-amber-50/60' : 'hover:bg-[#f6f9fc]/70') }, [
+      VEVA.dom.el('td', { class: 'px-3 py-2 font-mono text-[11px] text-[#697386] whitespace-nowrap' }, [r.fecha]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 font-medium text-[11px] max-w-[90px] truncate' }, [r.sociedad]),
+      VEVA.dom.el('td', { class: 'px-3 py-2' }, [VEVA.dom.bankBadge(r.banco)]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 max-w-[160px] truncate text-[#697386]' }, [r.descripcion || r.contraparte]),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-right font-mono text-red-500' }, [r.cargo > 0 ? r.cargo.toLocaleString('es-MX', { minimumFractionDigits: 2 }) : '']),
+      VEVA.dom.el('td', { class: 'px-3 py-2 text-right font-mono text-emerald-600' }, [r.abono > 0 ? r.abono.toLocaleString('es-MX', { minimumFractionDigits: 2 }) : '']),
+      VEVA.dom.el('td', { class: 'px-3 py-2' }, [sel])
+    ]);
+  }
+
+  function renderTabla(d) {
+    var body;
+    if (state.loading) {
+      body = VEVA.dom.el('div', { class: 'p-8 space-y-3' }, [0, 1, 2, 3, 4].map(function () { return VEVA.dom.el('div', { class: 'h-8 bg-[#e6ebf1] rounded animate-pulse' }, []); }));
+    } else if (!state.rows.length) {
+      body = VEVA.dom.el('div', { class: 'px-6 py-10 text-center text-[13px] text-[#697386]' }, ['Sin movimientos para los filtros seleccionados']);
+    } else {
+      var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [
+        'Fecha', 'Sociedad', 'Banco', 'Descripcion', 'Cargo', 'Abono', 'Clasificacion'
+      ].map(function (h, i) { return VEVA.dom.el('th', { class: 'px-3 py-2 text-[10px] font-bold text-[#697386] uppercase ' + (i >= 4 && i <= 5 ? 'text-right' : 'text-left') }, [h]); }))]);
+      var tbody = VEVA.dom.el('tbody', {}, state.rows.map(function (r) { return renderFilaMov(r, d); }));
+      body = VEVA.dom.el('table', { class: 'w-full text-[12px]' }, [thead, tbody]);
+    }
+    var wrap = VEVA.dom.el('div', { class: 'xl:col-span-3 bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [VEVA.dom.el('div', { class: 'overflow-x-auto' }, [body])]);
+    if (state.paginas > 1) {
+      wrap.appendChild(VEVA.dom.el('div', { class: 'px-4 py-3 border-t border-[#e6ebf1] flex items-center justify-between' }, [
+        VEVA.dom.el('p', { class: 'text-[11px] text-[#697386]' }, ['Pagina ' + state.pagina + ' de ' + state.paginas + ' (' + state.total + ' registros)']),
+        VEVA.dom.el('div', { class: 'flex items-center gap-1' }, [
+          VEVA.dom.el('button', { class: 'px-3 py-1 rounded-lg text-[11px] font-medium bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1] disabled:opacity-40', onClick: function () { cargar(state.pagina - 1); }, disabled: (state.pagina <= 1 || state.loading) ? 'disabled' : null }, ['Anterior']),
+          VEVA.dom.el('button', { class: 'px-3 py-1 rounded-lg text-[11px] font-medium bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1] disabled:opacity-40', onClick: function () { cargar(state.pagina + 1); }, disabled: (state.pagina >= state.paginas || state.loading) ? 'disabled' : null }, ['Siguiente'])
+        ])
+      ]));
+    }
+    return wrap;
+  }
+
+  function renderResumen(d) {
+    var items;
+    if (!d.resumenTipo.length) {
+      items = [VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Sin datos'])];
+    } else {
+      items = d.resumenTipo.map(function (item) {
+        var st = VEVA.tipoStyle(item.tipo);
+        var partes = [VEVA.dom.el('div', { class: 'flex items-center justify-between mb-0.5' }, [
+          VEVA.dom.el('span', { class: 'text-[10px] font-bold px-1.5 py-0.5 rounded ' + st.bg + ' ' + st.text }, [st.label]),
+          VEVA.dom.el('span', { class: 'text-[10px] text-[#697386]' }, [item.count + ' mov.'])
+        ])];
+        if (item.abonos > 0) partes.push(VEVA.dom.el('p', { class: 'text-[11px] text-emerald-600 font-mono text-right' }, [VEVA.fmt.mxn(item.abonos)]));
+        if (item.cargos > 0) partes.push(VEVA.dom.el('p', { class: 'text-[11px] text-red-500 font-mono text-right' }, ['-' + VEVA.fmt.mxn(item.cargos)]));
+        return VEVA.dom.el('div', { class: 'pb-2 border-b border-[#f6f9fc] last:border-0' }, partes);
+      });
+    }
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4 space-y-2' }, [VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-widest mb-3' }, ['Resumen por tipo'])].concat(items));
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-clasificador-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+    var d = computeDerived();
+
+    var headRow = VEVA.dom.el('div', { class: 'flex items-start justify-between' }, [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Clasificador de Movimientos']),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Revisa y corrige la clasificacion de movimientos bancarios'])
+      ])
+    ]);
+    if (d.numPendientes > 0) {
+      headRow.appendChild(VEVA.dom.el('button', { class: 'flex items-center gap-2 px-4 py-2 bg-[#635bff] text-white rounded-lg text-[13px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-50', onClick: guardar, disabled: state.saving ? 'disabled' : null }, [
+        VEVA.icon(state.saving ? 'loader' : 'save', 14, state.saving ? 'animate-spin' : ''),
+        'Guardar ' + d.numPendientes + ' cambio' + (d.numPendientes !== 1 ? 's' : '')
+      ]));
+    }
+    root.appendChild(headRow);
+
+    if (state.guardado) {
+      root.appendChild(VEVA.dom.el('div', { class: 'p-3 rounded-xl border text-[13px] font-medium flex items-center gap-2 ' + (state.guardado.ok ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-700') }, [
+        VEVA.icon(state.guardado.ok ? 'check-circle' : 'alert-circle', 14), state.guardado.msg
+      ]));
+    }
+    if (state.error) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl text-[13px] text-red-700' }, [state.error]));
+    }
+
+    root.appendChild(renderFiltros(d));
+    root.appendChild(renderKpis(d));
+    root.appendChild(VEVA.dom.el('div', { class: 'grid grid-cols-1 xl:grid-cols-4 gap-6' }, [renderTabla(d), renderResumen(d)]));
+  }
+
+  function onDocClick(e) {
+    if (!state.openFilter) return;
+    if (e.target.closest && e.target.closest('[data-multiselect]')) return;
+    state.openFilter = null; redraw();
+  }
+
+  VEVA.registerView('clasificador', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-clasificador-root', class: 'space-y-6' }, []));
+      document.addEventListener('click', onDocClick);
+      cargar(1);
+    },
+    destroy: function () { document.removeEventListener('click', onDocClick); }
+  });
+})();
+</script>

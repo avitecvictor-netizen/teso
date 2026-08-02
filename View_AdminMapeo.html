@@ -1,0 +1,106 @@
+<script>
+/**
+ * VEVA - Tab admin: Mapeo de Clasificacion.
+ * Responsabilidad unica: CRUD de MAPEO_FLUJO. Puerto directo de AdminMapeo
+ * (_source/Index.jsx:4498). Sub-vista de 'admin-flujo' -- se registra en
+ * VEVA.adminTabs.
+ *
+ * Backends citados: getMapeoFlujo, saveMapeoFlujoItem, deleteMapeoFlujoItem
+ * (Svc_Admin.gs). Campos verificados: tipo, clasificacion, clasificacion2,
+ * orden, activo.
+ */
+(function () {
+  var TIPOS_OPTS = ['INGRESOS', 'EGRESOS'];
+  var CLASIF_OPTS = ['OPERATIVO', 'INTERCIAS', 'NO OPERATIVO', 'FINANCIEROS', 'CAPEX', 'IMPUESTOS FEDE', 'IMPUESTOS LOCA'];
+  var state = { rows: [], loading: false, error: '', form: null, saving: false, msg: '' };
+
+  function cargar() {
+    state.loading = true; redraw();
+    VEVA.gas('getMapeoFlujo')
+      .then(function (r) { if (r.status === 'success') state.rows = r.data; else state.error = r.message; })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function guardar() {
+    if (!state.form || !state.form.tipo || !state.form.clasificacion || !state.form.clasificacion2) return;
+    state.saving = true; redraw();
+    VEVA.gas('saveMapeoFlujoItem', state.form)
+      .then(function (r) { if (r.status !== 'success') throw new Error(r.message); state.msg = 'Guardado'; state.form = null; cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function eliminar(item) {
+    if (!confirm('Eliminar "' + item.clasificacion2 + '"?')) return;
+    state.saving = true; redraw();
+    VEVA.gas('deleteMapeoFlujoItem', item)
+      .then(function () { cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function renderForm() {
+    if (!state.form) return null;
+    var selTipo = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]' }, TIPOS_OPTS.map(function (t) { return VEVA.dom.el('option', { value: t }, [t]); }));
+    selTipo.value = state.form.tipo; selTipo.addEventListener('change', function (e) { state.form.tipo = e.target.value; });
+    var selClasif = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]' }, CLASIF_OPTS.map(function (c) { return VEVA.dom.el('option', { value: c }, [c]); }));
+    selClasif.value = state.form.clasificacion; selClasif.addEventListener('change', function (e) { state.form.clasificacion = e.target.value; });
+    var inC2 = VEVA.dom.el('input', { class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]', placeholder: 'Nombre de subcategoria' }, []);
+    inC2.value = state.form.clasificacion2; inC2.addEventListener('input', function (e) { state.form.clasificacion2 = e.target.value; });
+    var inOrden = VEVA.dom.el('input', { type: 'number', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]' }, []);
+    inOrden.value = state.form.orden; inOrden.addEventListener('input', function (e) { state.form.orden = parseInt(e.target.value) || 99; });
+
+    var campo = function (label, node, extraCls) { return VEVA.dom.el('div', { class: 'space-y-1' + (extraCls ? ' ' + extraCls : '') }, [VEVA.dom.el('label', { class: 'text-[10px] text-[#697386] font-semibold uppercase' }, [label]), node]); };
+    return VEVA.dom.el('div', { class: 'border border-[#635bff] rounded-xl p-4 bg-[#f5f7ff] flex flex-wrap gap-3 items-end' }, [
+      campo('Tipo', selTipo), campo('Clasificacion', selClasif), campo('Clasificacion2', inC2, 'flex-1'), campo('Orden', inOrden),
+      VEVA.dom.el('div', { class: 'flex gap-2' }, [
+        VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium', onClick: guardar, disabled: state.saving ? 'disabled' : null }, ['Guardar']),
+        VEVA.dom.el('button', { class: 'px-3 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] text-[#697386]', onClick: function () { state.form = null; redraw(); } }, ['Cancelar'])
+      ])
+    ]);
+  }
+
+  function renderFila(r) {
+    return VEVA.dom.el('tr', { class: 'hover:bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [VEVA.dom.el('span', { class: 'px-1.5 py-0.5 rounded text-[10px] font-semibold ' + (r.tipo === 'INGRESOS' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700') }, [r.tipo])]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] font-medium' }, [r.clasificacion]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [r.clasificacion2]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-center text-[#697386]' }, [String(r.orden)]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-center' }, [r.activo ? '✓' : '—']),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [VEVA.dom.el('div', { class: 'flex gap-1' }, [
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-[#e6ebf1] rounded text-[10px] text-[#697386] hover:border-[#635bff]', onClick: function () { state.form = Object.assign({}, r); redraw(); } }, ['Editar']),
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-red-200 rounded text-[10px] text-red-400 hover:border-red-400', onClick: function () { eliminar(r); } }, ['Eliminar'])
+      ])])
+    ]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('admintab-mapeo-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var toolbar = [VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium flex items-center gap-1.5', onClick: function () { state.form = { tipo: 'INGRESOS', clasificacion: 'OPERATIVO', clasificacion2: '', orden: 99, activo: true }; redraw(); } }, [VEVA.icon('plus', 12), 'Nueva fila'])];
+    if (state.msg) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-emerald-600' }, [state.msg]));
+    if (state.error) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-red-500' }, [state.error]));
+    if (state.loading) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Cargando...']));
+
+    var thead = VEVA.dom.el('thead', { class: 'bg-[#f6f9fc] sticky top-0' }, [VEVA.dom.el('tr', {}, ['Tipo', 'Clasificacion', 'Clasificacion2', 'Orden', 'Activo', ''].map(function (h) { return VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[11px] font-semibold text-[#697386] border-b border-[#e6ebf1]' }, [h]); }))]);
+    var bodyRows = state.rows.map(renderFila);
+    if (!state.rows.length && !state.loading) bodyRows.push(VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: '6', class: 'px-3 py-6 text-center text-[#697386] italic' }, ['Sin datos'])]));
+    var table = VEVA.dom.el('table', { class: 'w-full text-[12px] border-collapse' }, [thead, VEVA.dom.el('tbody', {}, bodyRows)]);
+
+    var children = [VEVA.dom.el('div', { class: 'flex items-center gap-3' }, toolbar)];
+    var form = renderForm(); if (form) children.push(form);
+    children.push(VEVA.dom.el('div', { class: 'overflow-auto max-h-[60vh]' }, [table]));
+
+    root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-5 space-y-4' }, children));
+  }
+
+  VEVA.adminTabs = VEVA.adminTabs || {};
+  VEVA.adminTabs.mapeo = {
+    render: function (mount) { mount.appendChild(VEVA.dom.el('div', { id: 'admintab-mapeo-root' }, [])); cargar(); },
+    destroy: function () {}
+  };
+})();
+</script>

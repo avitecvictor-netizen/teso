@@ -1,0 +1,350 @@
+<script>
+/**
+ * VEVA - Vista: Conciliacion Mensual.
+ * Responsabilidad unica: pivote sociedad->banco->cuenta de ingresos/egresos
+ * por clasificacion, con drill-down a movimientos individuales por cuenta.
+ * Puerto directo de ConciliacionMensual (_source/Index.jsx:3154).
+ *
+ * Backends citados:
+ *   getConciliacion (Codigo.gs:2612) — corregido 2026-07-25 (ver nota en el
+ *     propio Codigo.gs): antes omitia IN_PRESTAMOS/EG_INVERSION/EG_PRESTAMOS
+ *     y usaba una llave inexistente para IN_INVERSION, causando que
+ *     totalIngresos/neto salieran siempre en $0. Ya corregido en produccion
+ *     (VEVA) antes de escribir esta vista, asi que este puerto usa los
+ *     nombres de campo correctos: IN_INVERSION, IN_PRESTAMOS, EG_INVERSION,
+ *     EG_PRESTAMOS.
+ *   getMovimientos (Codigo.gs:2105) — reutilizado aqui para el detalle por
+ *     cuenta (drill-down) y para el detalle del export XLSX.
+ *
+ * Nota fiel al original: el icono 'alert-triangle' (aviso de cuentas sin
+ * movimientos) tampoco existe en VEVA.ICONS ni en el _IP del React
+ * original -- se replica igual (sin icono), no se inventa uno nuevo.
+ */
+(function () {
+  var IN_COLS = ['IN_OPERATIVOS', 'IN_INTERCIAS', 'IN_TRASPASOS', 'IN_INVERSION', 'IN_PRESTAMOS', 'IN_OTROS'];
+  var EG_COLS = ['EG_PROVEEDORES', 'EG_NOMINA', 'EG_IMPUESTOS', 'EG_INTERCIAS', 'EG_TRASPASOS', 'EG_INVERSION', 'EG_PRESTAMOS', 'EG_OTROS'];
+  var IN_LBLS = ['Operativos', 'Intercias', 'Traspasos', 'Inversion', 'Prestamos', 'Otros'];
+  var EG_LBLS = ['Proveedores', 'Nomina', 'Impuestos', 'Intercias', 'Traspasos', 'Inversion', 'Prestamos', 'Otros'];
+  var CLASIF_OPTS = ['Operativos', 'Intercias', 'Traspasos', 'Inversion', 'Prestamos', 'Proveedores', 'Nomina', 'Impuestos', 'Otros'];
+  var TOT_COLS = 1 + IN_COLS.length + 1 + EG_COLS.length + 1 + 1 + 1 + 1 + 1;
+
+  var CLASIF_CHK = {
+    'Operativos':  function (f) { return (f.IN_OPERATIVOS || 0) > 0; },
+    'Intercias':   function (f) { return (f.IN_INTERCIAS || 0) > 0 || (f.EG_INTERCIAS || 0) > 0; },
+    'Traspasos':   function (f) { return (f.IN_TRASPASOS || 0) > 0 || (f.EG_TRASPASOS || 0) > 0; },
+    'Inversion':   function (f) { return (f.IN_INVERSION || 0) > 0 || (f.EG_INVERSION || 0) > 0; },
+    'Prestamos':   function (f) { return (f.IN_PRESTAMOS || 0) > 0 || (f.EG_PRESTAMOS || 0) > 0; },
+    'Proveedores': function (f) { return (f.EG_PROVEEDORES || 0) > 0; },
+    'Nomina':      function (f) { return (f.EG_NOMINA || 0) > 0; },
+    'Impuestos':   function (f) { return (f.EG_IMPUESTOS || 0) > 0; },
+    'Otros':       function (f) { return (f.IN_OTROS || 0) > 0 || (f.EG_OTROS || 0) > 0; }
+  };
+
+  var state = {
+    loading: true, error: null, filas: [], periodos: [], desde: '', hasta: '', sinMovs: [],
+    filtSocList: [], filtBancoList: [], filtCuentaList: [], filtClasifList: [],
+    opSociedades: [], opBancos: [], opCuentas: [],
+    expandedSoc: {}, expandedBan: {}, expandedCtaSet: {}, ctaMovsMap: {}, openFilter: null
+  };
+
+  function fmtC(n) { return (n && n > 0) ? VEVA.fmt.mxn(n) : '—'; }
+
+  function cargar() {
+    state.loading = true; state.error = null; redraw();
+    var payload = state.desde ? { desde: state.desde, hasta: state.hasta || state.desde } : {};
+    VEVA.gas('getConciliacion', payload)
+      .then(function (res) {
+        if (res.status !== 'success') throw new Error(res.message || 'Error al cargar');
+        var d = res.data || {};
+        state.filas = d.filas || [];
+        state.periodos = d.periodos || [];
+        state.sinMovs = d.sinMovimientos || [];
+        if (!state.desde && d.periodoActivo) { state.desde = d.periodoActivo; state.hasta = d.periodoActivo; }
+        var uS = {}, uB = {}, uC = {};
+        state.filas.forEach(function (f) {
+          if (f.sociedad) uS[f.sociedad] = true;
+          if (f.banco) uB[f.banco] = true;
+          if (f.cuenta) uC['*' + f.cuenta.slice(-4)] = true;
+        });
+        state.opSociedades = Object.keys(uS).sort();
+        state.opBancos = Object.keys(uB).sort();
+        state.opCuentas = Object.keys(uC).sort();
+        var exS = {}; Object.keys(uS).forEach(function (s) { exS[s] = true; });
+        state.expandedSoc = exS; state.expandedBan = {}; state.expandedCtaSet = {}; state.ctaMovsMap = {};
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function toggleFilter(key) { state.openFilter = state.openFilter === key ? null : key; redraw(); }
+
+  function getFiltered() {
+    return state.filas.filter(function (f) {
+      if (state.filtSocList.length && state.filtSocList.indexOf(f.sociedad) < 0) return false;
+      if (state.filtBancoList.length && state.filtBancoList.indexOf(f.banco) < 0) return false;
+      if (state.filtCuentaList.length && state.filtCuentaList.indexOf('*' + f.cuenta.slice(-4)) < 0) return false;
+      if (state.filtClasifList.length) {
+        var match = state.filtClasifList.some(function (c) { var chk = CLASIF_CHK[c]; return chk && chk(f); });
+        if (!match) return false;
+      }
+      return true;
+    });
+  }
+
+  function aggSums(arr) {
+    var r = { IN_OPERATIVOS: 0, IN_INTERCIAS: 0, IN_TRASPASOS: 0, IN_INVERSION: 0, IN_PRESTAMOS: 0, IN_OTROS: 0,
+      EG_PROVEEDORES: 0, EG_NOMINA: 0, EG_IMPUESTOS: 0, EG_INTERCIAS: 0, EG_TRASPASOS: 0, EG_INVERSION: 0, EG_PRESTAMOS: 0, EG_OTROS: 0,
+      totalIngresos: 0, totalEgresos: 0, neto: 0 };
+    arr.forEach(function (x) {
+      Object.keys(r).forEach(function (k) { r[k] += x[k] || 0; });
+    });
+    return r;
+  }
+
+  function getGrouped(filtered) {
+    var socMap = {}, socOrder = [];
+    filtered.forEach(function (f) {
+      if (!socMap[f.sociedad]) { socMap[f.sociedad] = { tipoOrder: f.tipoOrder || 5, bancos: {}, bancoOrder: [] }; socOrder.push(f.sociedad); }
+      var sm = socMap[f.sociedad];
+      if (!sm.bancos[f.banco]) { sm.bancos[f.banco] = []; sm.bancoOrder.push(f.banco); }
+      sm.bancos[f.banco].push(f);
+    });
+    var socs = socOrder.sort(function (a, b) {
+      var ta = socMap[a].tipoOrder || 5, tb = socMap[b].tipoOrder || 5;
+      return ta !== tb ? ta - tb : (a < b ? -1 : a > b ? 1 : 0);
+    });
+    return socs.map(function (soc) {
+      var sm = socMap[soc];
+      var bans = sm.bancoOrder.slice().sort().map(function (ban) {
+        var cuentas = sm.bancos[ban];
+        return { banco: ban, cuentas: cuentas, sub: aggSums(cuentas) };
+      });
+      return { sociedad: soc, bancos: bans, sub: aggSums(bans.map(function (b) { return b.sub; })) };
+    });
+  }
+
+  function periodoRango() {
+    var d = (state.desde || state.hasta) + '-01';
+    var hBase = state.hasta || state.desde;
+    var h = hBase + '-' + String(new Date(+hBase.slice(0, 4), +hBase.slice(5, 7), 0).getDate()).padStart(2, '0');
+    return { desde: d, hasta: h };
+  }
+
+  function exportXlsx(filtered) {
+    var wb = XLSX.utils.book_new();
+    var resumen = [['Sociedad', 'Banco', 'Cuenta',
+      'IN OPERATIVOS', 'IN INTERCIAS', 'IN TRASPASOS', 'IN INVERSION', 'IN PRESTAMOS', 'IN OTROS',
+      'EG PROVEEDORES', 'EG NOMINA', 'EG IMPUESTOS', 'EG INTERCIAS', 'EG TRASPASOS', 'EG INVERSION', 'EG PRESTAMOS', 'EG OTROS',
+      'TOTAL INGRESOS', 'TOTAL EGRESOS', 'NETO']];
+    filtered.forEach(function (f) {
+      resumen.push([f.sociedad, f.banco, f.cuenta,
+        f.IN_OPERATIVOS, f.IN_INTERCIAS, f.IN_TRASPASOS, f.IN_INVERSION, f.IN_PRESTAMOS, f.IN_OTROS,
+        f.EG_PROVEEDORES, f.EG_NOMINA, f.EG_IMPUESTOS, f.EG_INTERCIAS, f.EG_TRASPASOS, f.EG_INVERSION, f.EG_PRESTAMOS, f.EG_OTROS,
+        f.totalIngresos, f.totalEgresos, f.neto]);
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumen), 'Resumen');
+    var rango = periodoRango();
+    VEVA.gas('getMovimientos', { desde: rango.desde, hasta: rango.hasta, porPagina: 5000 })
+      .then(function (detRes) {
+        if (detRes.status === 'success' && (detRes.data.rows || []).length) {
+          var detalle = [['Fecha', 'Sociedad', 'Banco', 'Cuenta', 'Descripcion', 'Cargo', 'Abono', 'Tipo', 'Clasificacion']];
+          detRes.data.rows.forEach(function (r) { detalle.push([r.fecha, r.sociedad, r.banco, r.cuenta, r.descripcion, r.cargo || '', r.abono || '', r.tipo, r.clasificacion]); });
+          if (detRes.data.total > (detRes.data.rows || []).length) detalle.push(['NOTA: detalle truncado — se exportaron ' + detRes.data.rows.length + ' de ' + detRes.data.total + ' movimientos totales']);
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(detalle), 'Detalle');
+        }
+      })
+      .catch(function (e) { state.error = 'Export XLSX: hoja Detalle no disponible — ' + (e.message || String(e)); redraw(); })
+      .finally(function () {
+        XLSX.writeFile(wb, 'Conciliacion_' + state.desde + (state.hasta && state.hasta !== state.desde ? '_' + state.hasta : '') + '.xlsx');
+      });
+  }
+
+  function handleToggleCuenta(rawCuenta) {
+    var nowExpanded = !state.expandedCtaSet[rawCuenta];
+    if (nowExpanded) state.expandedCtaSet[rawCuenta] = true; else delete state.expandedCtaSet[rawCuenta];
+    if (nowExpanded && !state.ctaMovsMap[rawCuenta]) {
+      state.ctaMovsMap[rawCuenta] = { loading: true, rows: null };
+      redraw();
+      var rango = periodoRango();
+      VEVA.gas('getMovimientos', { desde: rango.desde, hasta: rango.hasta, cuenta: [rawCuenta], porPagina: 500 })
+        .then(function (res) {
+          if (res.status === 'success') state.ctaMovsMap[rawCuenta] = { loading: false, rows: res.data.rows || [] };
+          else state.ctaMovsMap[rawCuenta] = { loading: false, rows: [], error: res.message };
+        })
+        .catch(function (e) { state.ctaMovsMap[rawCuenta] = { loading: false, rows: [], error: e.message }; })
+        .finally(redraw);
+    } else {
+      redraw();
+    }
+  }
+
+  function renderFiltros() {
+    var campo = function (label, node) { return VEVA.dom.el('div', {}, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider block mb-1' }, [label]), node]); };
+    var selDesde = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, state.periodos.map(function (p) { return VEVA.dom.el('option', { value: p }, [p]); }));
+    selDesde.value = state.desde; selDesde.addEventListener('change', function (e) { state.desde = e.target.value; redraw(); });
+    var selHasta = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, state.periodos.map(function (p) { return VEVA.dom.el('option', { value: p }, [p]); }));
+    selHasta.value = state.hasta; selHasta.addEventListener('change', function (e) { state.hasta = e.target.value; redraw(); });
+
+    var items = [
+      campo('Desde', selDesde), campo('Hasta', selHasta),
+      campo('Sociedad', VEVA.dom.multiSelect({ options: state.opSociedades, value: state.filtSocList, placeholder: 'Todas', isOpen: state.openFilter === 'soc', onToggleOpen: function () { toggleFilter('soc'); }, onChange: function (v) { state.filtSocList = v; redraw(); } })),
+      campo('Banco', VEVA.dom.multiSelect({ options: state.opBancos, value: state.filtBancoList, placeholder: 'Todos', isOpen: state.openFilter === 'banco', onToggleOpen: function () { toggleFilter('banco'); }, onChange: function (v) { state.filtBancoList = v; redraw(); } })),
+      campo('Cuenta', VEVA.dom.multiSelect({ options: state.opCuentas, value: state.filtCuentaList, placeholder: 'Todas', isOpen: state.openFilter === 'cuenta', onToggleOpen: function () { toggleFilter('cuenta'); }, onChange: function (v) { state.filtCuentaList = v; redraw(); } })),
+      campo('Clasificacion', VEVA.dom.multiSelect({ options: CLASIF_OPTS, value: state.filtClasifList, placeholder: 'Todas', isOpen: state.openFilter === 'clasif', onToggleOpen: function () { toggleFilter('clasif'); }, onChange: function (v) { state.filtClasifList = v; redraw(); } })),
+      VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-50', onClick: cargar, disabled: state.loading ? 'disabled' : null }, [VEVA.icon('refresh-cw', 12, state.loading ? 'animate-spin' : ''), 'Actualizar'])
+    ];
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4' }, [VEVA.dom.el('div', { class: 'flex flex-wrap items-end gap-3' }, items)]);
+  }
+
+  function renderMovDetalle(cuenta) {
+    var mov = state.ctaMovsMap[cuenta];
+    if (mov.loading) return VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: String(TOT_COLS), class: 'px-4 py-2 text-center text-[10px] text-[#697386] italic bg-[#fafffe]' }, [VEVA.dom.el('span', { class: 'inline-flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Cargando movimientos...'])])]);
+    if (!mov.rows || !mov.rows.length) return VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: String(TOT_COLS), class: 'px-4 py-2 text-center text-[10px] text-[#697386] italic bg-[#fafffe]' }, ['Sin movimientos en el rango'])]);
+    return mov.rows.map(function (m) {
+      var partes = [
+        VEVA.dom.el('span', { class: 'text-[#697386] w-20 flex-shrink-0 font-mono' }, [m.fecha.slice(5)]),
+        VEVA.dom.el('span', { class: 'flex-1 truncate text-[#0a2540] min-w-0' }, [m.descripcion || m.contraparte || '—'])
+      ];
+      if (m.cargo > 0) partes.push(VEVA.dom.el('span', { class: 'font-mono text-red-600 w-24 text-right flex-shrink-0' }, ['-' + VEVA.fmt.mxn(m.cargo)]));
+      if (m.abono > 0) partes.push(VEVA.dom.el('span', { class: 'font-mono text-emerald-700 w-24 text-right flex-shrink-0' }, ['+' + VEVA.fmt.mxn(m.abono)]));
+      partes.push(VEVA.dom.el('span', { class: 'text-[#697386] w-28 text-right flex-shrink-0 truncate' }, [m.clasificacion]));
+      return VEVA.dom.el('tr', { class: 'border-b border-[#f0f0f0] bg-[#fafffe]' }, [VEVA.dom.el('td', { colspan: String(TOT_COLS), class: 'px-0 py-0' }, [VEVA.dom.el('div', { class: 'flex items-center gap-3 pl-16 pr-4 py-1 text-[10px]' }, partes)])]);
+    });
+  }
+
+  function renderPivotRow(data, label, depth, onToggle, isExpanded, isSubtotal) {
+    var bgCls = isSubtotal ? 'bg-[#f6f9fc] font-semibold' : '';
+    var indent = depth === 0 ? 'pl-3' : depth === 1 ? 'pl-7' : 'pl-11';
+    var showSaldo = depth === 2;
+    var dif = showSaldo && data.saldoFinalCalc != null && data.saldoReportado != null ? data.saldoFinalCalc - data.saldoReportado : null;
+    var conciliado = dif != null && Math.abs(dif) < 1;
+
+    var labelParts = [];
+    if (onToggle) labelParts.push(VEVA.icon(isExpanded ? 'chevron-down' : 'chevron-right', 10, 'flex-shrink-0 text-[#697386]'));
+    labelParts.push(VEVA.dom.el('span', {}, [label]));
+
+    var tds = [VEVA.dom.el('td', { class: 'px-2 py-2 text-[11px] font-medium max-w-[140px] ' + indent }, [VEVA.dom.el('div', { class: 'flex items-center gap-1 truncate' }, labelParts)])];
+    IN_COLS.forEach(function (c) { tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono text-emerald-700' }, [fmtC(data[c])])); });
+    tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono font-bold text-emerald-700' }, [VEVA.fmt.mxn(data.totalIngresos)]));
+    EG_COLS.forEach(function (c) { tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono text-red-600' }, [fmtC(data[c])])); });
+    tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono font-bold text-red-600' }, [VEVA.fmt.mxn(data.totalEgresos)]));
+    tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono font-bold ' + (data.neto >= 0 ? 'text-emerald-700' : 'text-red-600') }, [VEVA.fmt.mxn(data.neto)]));
+    tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono text-[#697386]' }, [showSaldo && data.saldoFinalCalc != null ? VEVA.fmt.mxn(data.saldoFinalCalc) : '—']));
+    tds.push(VEVA.dom.el('td', { class: 'px-2 py-2 text-right text-[11px] font-mono text-[#697386]' }, [showSaldo && data.saldoReportado != null ? VEVA.fmt.mxn(data.saldoReportado) : '—']));
+    var concilCell = VEVA.dom.el('td', { class: 'px-2 py-2 text-center' }, []);
+    if (showSaldo && dif != null) concilCell.appendChild(conciliado ? VEVA.dom.el('span', { class: 'text-emerald-600 font-bold text-[11px]' }, ['✓']) : VEVA.dom.el('span', { class: 'px-1.5 py-0.5 bg-red-50 text-red-600 text-[10px] font-mono rounded' }, [VEVA.fmt.mxn(dif)]));
+    tds.push(concilCell);
+
+    return VEVA.dom.el('tr', { class: 'border-b border-[#f0f0f0] ' + bgCls + (onToggle ? ' cursor-pointer hover:bg-[#f6f9fc]/80' : ''), onClick: onToggle || null }, tds);
+  }
+
+  function renderTablaHead() {
+    var thCls = 'px-2 py-2 text-[9px] font-bold text-[#697386] uppercase text-right whitespace-nowrap';
+    var row1 = [VEVA.dom.el('th', { class: 'px-2 py-2 text-left text-[9px] font-bold text-[#697386] uppercase min-w-[140px]' }, ['Sociedad / Banco / Cuenta'])];
+    row1.push(VEVA.dom.el('th', { colspan: String(IN_COLS.length), class: 'px-2 py-1 text-center text-[9px] font-bold text-emerald-700 uppercase border-l border-[#e6ebf1]' }, ['INGRESOS']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1] text-emerald-900' }, ['TOTAL ING']));
+    row1.push(VEVA.dom.el('th', { colspan: String(EG_COLS.length), class: 'px-2 py-1 text-center text-[9px] font-bold text-red-600 uppercase border-l border-[#e6ebf1]' }, ['EGRESOS']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1] text-red-900' }, ['TOTAL EGR']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1] text-[#0a2540]' }, ['NETO']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1] text-[#697386]' }, ['SALDO CALC']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#f0f0f0] text-[#697386]' }, ['SALDO BANCO']));
+    row1.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#f0f0f0] text-[#697386]' }, ['CONCIL']));
+
+    var row2 = [VEVA.dom.el('th', { class: 'px-2 py-1' }, [])];
+    IN_LBLS.forEach(function (l) { row2.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#f0f0f0]' }, [l])); });
+    row2.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1]' }, []));
+    EG_LBLS.forEach(function (l) { row2.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#f0f0f0]' }, [l])); });
+    row2.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1]' }, []));
+    row2.push(VEVA.dom.el('th', { class: thCls + ' border-l border-[#e6ebf1]' }, []));
+    row2.push(VEVA.dom.el('th', { class: 'px-2 py-1' }, []));
+    row2.push(VEVA.dom.el('th', { class: 'px-2 py-1' }, []));
+    row2.push(VEVA.dom.el('th', { class: 'px-2 py-1' }, []));
+
+    return VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'bg-[#f6f9fc] border-b-2 border-[#e6ebf1]' }, row1), VEVA.dom.el('tr', { class: 'bg-[#f6f9fc] border-b border-[#e6ebf1]' }, row2)]);
+  }
+
+  function renderTablaBody(grouped) {
+    var rows = [];
+    grouped.forEach(function (sg) {
+      var socExp = !!state.expandedSoc[sg.sociedad];
+      rows.push(renderPivotRow(sg.sub, sg.sociedad, 0, function () { state.expandedSoc[sg.sociedad] = !socExp; redraw(); }, socExp, true));
+      if (!socExp) return;
+      sg.bancos.forEach(function (bg) {
+        var banKey = sg.sociedad + '|' + bg.banco;
+        var banExp = !!state.expandedBan[banKey];
+        rows.push(renderPivotRow(bg.sub, bg.banco, 1, function () { state.expandedBan[banKey] = !banExp; redraw(); }, banExp, false));
+        if (!banExp) return;
+        bg.cuentas.forEach(function (f) {
+          var ctaExp = !!state.expandedCtaSet[f.cuenta];
+          rows.push(renderPivotRow(f, '*' + f.cuenta.slice(-4), 2, function () { handleToggleCuenta(f.cuenta); }, ctaExp, false));
+          if (ctaExp && state.ctaMovsMap[f.cuenta]) rows = rows.concat(renderMovDetalle(f.cuenta));
+        });
+      });
+    });
+    return VEVA.dom.el('tbody', {}, rows);
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-conciliacion-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var filtered = getFiltered();
+    var headRow = VEVA.dom.el('div', { class: 'flex items-start justify-between' }, [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Conciliacion Mensual']),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Resumen de ingresos y egresos por cuenta con drill-down'])
+      ])
+    ]);
+    if (!state.loading && filtered.length) {
+      headRow.appendChild(VEVA.dom.el('button', { class: 'flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-[13px] font-bold hover:bg-emerald-700 transition-all', onClick: function () { exportXlsx(filtered); } }, [VEVA.icon('download', 14), 'Exportar XLSX']));
+    }
+    root.appendChild(headRow);
+
+    root.appendChild(renderFiltros());
+
+    if (state.error) root.appendChild(VEVA.dom.el('p', { class: 'text-[13px] text-red-500' }, [state.error]));
+
+    if (state.sinMovs.length) {
+      root.appendChild(VEVA.dom.el('div', { class: 'px-4 py-2.5 bg-amber-50 border border-amber-100 rounded-xl text-[12px] text-amber-800 flex items-center gap-2' }, [
+        VEVA.icon('alert-triangle', 14),
+        VEVA.dom.el('span', {}, [VEVA.dom.el('strong', {}, [String(state.sinMovs.length)]), ' cuenta' + (state.sinMovs.length !== 1 ? 's' : '') + ' sin movimientos en este periodo: ' + state.sinMovs.map(function (s) { return s.sociedad + '/' + s.banco + ' ' + s.cuenta; }).join(' · ')])
+      ]));
+    }
+
+    if (state.desde && state.hasta && state.desde !== state.hasta) {
+      root.appendChild(VEVA.dom.el('div', { class: 'px-4 py-2.5 bg-blue-50 border border-blue-100 rounded-xl text-[12px] text-blue-700 flex items-center gap-2' }, [
+        VEVA.icon('alert-circle', 14),
+        VEVA.dom.el('span', {}, ['Rango multimensual: las columnas ', VEVA.dom.el('strong', {}, ['Saldo Calc']), ' y ', VEVA.dom.el('strong', {}, ['Saldo Banco']), ' corresponden al cierre de ', VEVA.dom.el('strong', {}, [state.hasta]), '. No son comparables con el Neto acumulado del rango.'])
+      ]));
+    }
+
+    if (state.loading) {
+      root.appendChild(VEVA.dom.el('div', { class: 'space-y-2' }, [0, 1, 2, 3].map(function () { return VEVA.dom.el('div', { class: 'h-10 bg-[#e6ebf1] rounded animate-pulse' }, []); })));
+      return;
+    }
+    var grouped = getGrouped(filtered);
+    if (!grouped.length) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['Sin datos para el periodo seleccionado']));
+      return;
+    }
+    var table = VEVA.dom.el('table', { class: 'w-full text-[12px] border-collapse' }, [renderTablaHead(), renderTablaBody(grouped)]);
+    root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [VEVA.dom.el('div', { class: 'overflow-x-auto' }, [table])]));
+  }
+
+  function onDocClick(e) {
+    if (!state.openFilter) return;
+    if (e.target.closest && e.target.closest('[data-multiselect]')) return;
+    state.openFilter = null; redraw();
+  }
+
+  VEVA.registerView('conciliacion', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-conciliacion-root', class: 'space-y-6' }, []));
+      document.addEventListener('click', onDocClick);
+      cargar();
+    },
+    destroy: function () { document.removeEventListener('click', onDocClick); }
+  });
+})();
+</script>

@@ -1,0 +1,69 @@
+<script>
+/**
+ * VEVA - Vista: Configuracion Flujo (contenedor de tabs admin).
+ * Responsabilidad unica: cambiar entre las 6 sub-vistas admin registradas
+ * en VEVA.adminTabs (cada una en su propio archivo View_AdminX.html, regla
+ * 2.2 SRP del PROMPT_MIGRACION). Puerto directo de AdminFlujo
+ * (_source/Index.jsx:4202). Este archivo NO contiene logica de negocio,
+ * solo el switch de tabs -- delgado a proposito.
+ */
+(function () {
+  var TABS = [
+    { id: 'saldos', label: 'Saldos Iniciales' },
+    { id: 'mapeo', label: 'Mapeo de Clasificacion' },
+    { id: 'cuentas', label: 'Cuentas del Grupo' },
+    { id: 'cadena', label: 'Cadena de Saldos' },
+    { id: 'recalc', label: 'Recalcular SUM' },
+    { id: 'recalcmov', label: 'Recalcular Movs' }
+  ];
+
+  var state = { tab: 'saldos' };
+  var currentTabModule = null;
+  var tabMount = null;
+
+  function mostrarTab(id) {
+    if (currentTabModule && typeof currentTabModule.destroy === 'function') currentTabModule.destroy();
+    VEVA.dom.clear(tabMount);
+    currentTabModule = (VEVA.adminTabs || {})[id];
+    if (!currentTabModule) {
+      tabMount.appendChild(VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] italic mt-4' }, ['Tab "' + id + '" no disponible.']));
+      return;
+    }
+    currentTabModule.render(tabMount);
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-adminflujo-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var btns = TABS.map(function (t) {
+      var active = state.tab === t.id;
+      return VEVA.dom.el('button', {
+        class: 'px-4 py-2 text-[12px] font-medium rounded-lg transition-all ' + (active ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1]'),
+        onClick: function () { if (state.tab !== t.id) { state.tab = t.id; mostrarTab(t.id); redraw(); } }
+      }, [t.label]);
+    });
+
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Configuracion Flujo']),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Saldos iniciales, mapeo de clasificaciones y cuentas del grupo'])
+    ]));
+    root.appendChild(VEVA.dom.el('div', { class: 'flex gap-2 flex-wrap' }, btns));
+    tabMount = VEVA.dom.el('div', {}, []);
+    root.appendChild(tabMount);
+    mostrarTab(state.tab);
+  }
+
+  VEVA.registerView('admin-flujo', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-adminflujo-root', class: 'space-y-6' }, []));
+      redraw();
+    },
+    destroy: function () {
+      if (currentTabModule && typeof currentTabModule.destroy === 'function') currentTabModule.destroy();
+      currentTabModule = null;
+    }
+  });
+})();
+</script>

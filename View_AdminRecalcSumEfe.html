@@ -1,0 +1,76 @@
+<script>
+/**
+ * VEVA - Tab admin: Recalcular SUM_MOV y SUM_EFE.
+ * Responsabilidad unica: llama recalcularSumPeriodos (backend/Codigo.gs)
+ * para un rango de meses. Puerto directo de AdminRecalcSumEfe
+ * (_source/Index.jsx:4232). Sub-vista de 'admin-flujo', no es un item de
+ * VEVA.MENU -- se registra en VEVA.adminTabs, no en VEVA.registerView.
+ *
+ * Backend citado: recalcularSumPeriodos (Codigo.gs).
+ *
+ * Nota: el React original ligaba esta accion a un OpEnCursoCtx global (
+ * banner "Operacion en curso" en el header de la app). No se porto ese
+ * mecanismo -- mismo criterio ya aplicado en View_CargaMovimientos.html
+ * para acciones igual de largas (sincronizarTransferenciasHist, etc.):
+ * solo estado de carga local en el boton.
+ */
+(function () {
+  var state = { desde: '', hasta: '', loading: false, msg: null };
+
+  function periodosBetween(d, h) {
+    var res = [];
+    var parts = d.split('-'); var y = +parts[0], m = +parts[1];
+    var hp = h.split('-'); var yh = +hp[0], mh = +hp[1];
+    while (y < yh || (y === yh && m <= mh)) {
+      res.push(y + '-' + String(m).padStart(2, '0'));
+      m++; if (m > 12) { m = 1; y++; }
+    }
+    return res;
+  }
+
+  function recalcular() {
+    if (!state.desde || !state.hasta || state.desde > state.hasta) return;
+    var periodos = periodosBetween(state.desde, state.hasta);
+    state.loading = true; state.msg = null; redraw();
+    VEVA.gas('recalcularSumPeriodos', { periodos: periodos })
+      .then(function (r) { state.msg = { ok: r.status === 'success', text: r.message }; })
+      .catch(function (e) { state.msg = { ok: false, text: String(e) }; })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function redraw() {
+    var root = document.getElementById('admintab-recalcsumefe-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+    var inputCls = 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 bg-white outline-none focus:border-[#635bff]';
+    var valid = state.desde && state.hasta && state.desde <= state.hasta;
+
+    var inDesde = VEVA.dom.el('input', { type: 'month', class: inputCls }, []);
+    inDesde.value = state.desde; inDesde.addEventListener('change', function (e) { state.desde = e.target.value; redraw(); });
+    var inHasta = VEVA.dom.el('input', { type: 'month', class: inputCls }, []);
+    inHasta.value = state.hasta; inHasta.addEventListener('change', function (e) { state.hasta = e.target.value; redraw(); });
+
+    var children = [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h3', { class: 'text-[15px] font-semibold' }, ['Recalcular SUM_MOV y SUM_EFE']),
+        VEVA.dom.el('p', { class: 'text-[12px] text-[#697386] mt-1' }, ['Regenera los agregados para los meses seleccionados a partir de los movimientos ya cargados en HIST. Util cuando se cargaron archivos con una version anterior del codigo.'])
+      ]),
+      VEVA.dom.el('div', { class: 'flex flex-wrap items-end gap-4' }, [
+        VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[11px] text-[#697386] font-medium' }, ['Desde']), inDesde]),
+        VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[11px] text-[#697386] font-medium' }, ['Hasta']), inHasta]),
+        VEVA.dom.el('button', { class: 'px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium flex items-center gap-1.5 disabled:opacity-40', onClick: recalcular, disabled: (state.loading || !valid) ? 'disabled' : null }, [VEVA.icon(state.loading ? 'loader' : 'refresh-cw', 12, state.loading ? 'animate-spin' : ''), state.loading ? 'Procesando...' : 'Recalcular'])
+      ])
+    ];
+    if (valid && !state.loading) children.push(VEVA.dom.el('p', { class: 'text-[11px] text-[#697386]' }, ['Periodos a recalcular: ' + periodosBetween(state.desde, state.hasta).join(', ')]));
+    if (state.msg) children.push(VEVA.dom.el('div', { class: 'rounded-lg px-4 py-3 text-[12px] ' + (state.msg.ok ? 'bg-[#e3fcef] text-[#1a7f4e]' : 'bg-[#fce8e8] text-[#c0392b]') }, [state.msg.text]));
+
+    root.appendChild(VEVA.dom.el('div', { class: 'space-y-6 mt-4' }, children));
+  }
+
+  VEVA.adminTabs = VEVA.adminTabs || {};
+  VEVA.adminTabs.recalc = {
+    render: function (mount) { mount.appendChild(VEVA.dom.el('div', { id: 'admintab-recalcsumefe-root' }, [])); redraw(); },
+    destroy: function () {}
+  };
+})();
+</script>

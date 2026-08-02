@@ -1,0 +1,485 @@
+<script>
+/**
+ * VEVA - Vista: Lista de Distribucion.
+ * Responsabilidad unica: administrar destinatarios de reportes y enviar el
+ * reporte de posicion bancaria por correo. Puerto directo de
+ * AdminDistribucion (_source/Index.jsx:2362).
+ *
+ * Backends citados (tab "Reporte de Posicion"): getListaDistribucion,
+ * guardarListaDistribucion, enviarReportePosicion (Codigo.gs). Campos
+ * verificados: email, nombre, activo, fechaAlta.
+ *
+ * Bloque E (2026-07-27, pedido explicito del usuario): segunda pestaña
+ * interna "CC de Pagos" -- lista de copia (CC) POR SOCIEDAD, permanente,
+ * que se agrega a los 7 tipos de correo de pagos (Cargada/Confirmada/
+ * Autorizada/Liberada/Subida/Aplicada/Rechazada). Se decidio metida
+ * DENTRO de esta pantalla (a diferencia de "Notificaciones de Pagos",
+ * que se hizo aparte) -- mismo archivo con pestanas internas, mismo
+ * patron ya usado por View_Pagos.html (varias pestanas en un solo
+ * archivo), no un contenedor+tabs repartido en archivos separados (sin
+ * precedente en el proyecto, mas riesgo). Backends citados aqui:
+ * getListaCcPagos, guardarListaCcPagos, getCatalogoCuentasPago
+ * (Svc_Pagos.js). Complementa (no reemplaza) "Notificaciones de Pagos":
+ * esa es el destinatario principal (TO), esta es la copia (CC).
+ */
+(function () {
+  var SCOPES = [
+    { id: 'actual', label: 'Posicion actual' },
+    { id: 'anterior', label: 'Actual + Anterior' },
+    { id: '5dias', label: 'Ultimos 5 dias' },
+    { id: '15dias', label: 'Ultimos 15 dias' }
+  ];
+
+  var state = {
+    activeSubTab: 'reporte',
+
+    // ---- Tab "Reporte de Posicion" (original, sin cambios de logica) ----
+    lista: [], loading: true, saving: false, sending: false, sendScope: 'actual',
+    resultado: null, newEmail: '', newNombre: '', error: null,
+
+    // ---- Tab "CC de Pagos" (Bloque E, nuevo) ----
+    ccListaCompleta: [], ccSociedades: [], ccSociedadSel: '',
+    ccLoading: true, ccSaving: false, ccError: null,
+    ccNewEmail: '', ccNewNombre: '', ccUsuario: null,
+    ccNuevoSociedades: {}, ccCargado: false
+  };
+
+  function cargarLista() {
+    state.loading = true; state.error = null; redraw();
+    VEVA.gas('getListaDistribucion')
+      .then(function (res) { if (res.status === 'success') state.lista = res.data; else state.error = res.message; })
+      .catch(function (e) { state.error = e.message; })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function guardar(listaActual) {
+    state.saving = true; redraw();
+    VEVA.gas('guardarListaDistribucion', { lista: listaActual })
+      .then(function (res) { if (res.status !== 'success') state.error = res.message; })
+      .catch(function (e) { state.error = e.message; })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function agregar() {
+    if (state.newEmail.indexOf('@') < 0) return;
+    var nueva = state.lista.concat([{ email: state.newEmail.trim(), nombre: state.newNombre.trim(), activo: true }]);
+    state.lista = nueva; state.newEmail = ''; state.newNombre = '';
+    guardar(nueva);
+  }
+
+  function toggleActivo(i) {
+    var nueva = state.lista.map(function (r, idx) { return idx === i ? Object.assign({}, r, { activo: !r.activo }) : r; });
+    state.lista = nueva; redraw();
+    guardar(nueva);
+  }
+
+  function eliminar(i) {
+    var nueva = state.lista.filter(function (r, idx) { return idx !== i; });
+    state.lista = nueva; redraw();
+    guardar(nueva);
+  }
+
+  function enviar() {
+    var activos = state.lista.filter(function (r) { return r.activo; }).map(function (r) { return r.email; });
+    if (!activos.length) { state.resultado = { status: 'error', message: 'No hay destinatarios activos' }; redraw(); return; }
+    state.sending = true; state.resultado = null; redraw();
+    VEVA.gas('enviarReportePosicion', { scope: state.sendScope, destinatarios: activos })
+      .then(function (res) { state.resultado = res; })
+      .catch(function (e) { state.resultado = { status: 'error', message: e.message }; })
+      .finally(function () { state.sending = false; redraw(); });
+  }
+
+  function renderFilaDestinatario(r, i) {
+    var toggle = VEVA.dom.el('button', { class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (r.activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]'), onClick: function () { toggleActivo(i); } }, [
+      VEVA.dom.el('span', { class: 'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ' + (r.activo ? 'left-5' : 'left-0.5') }, [])
+    ]);
+    return VEVA.dom.el('tr', { class: r.activo ? '' : 'opacity-50' }, [
+      VEVA.dom.el('td', { class: 'px-5 py-3 font-mono text-[12px]' }, [r.email]),
+      VEVA.dom.el('td', { class: 'px-5 py-3 text-[#697386]' }, [r.nombre || '—']),
+      VEVA.dom.el('td', { class: 'px-5 py-3 text-center' }, [toggle]),
+      VEVA.dom.el('td', { class: 'px-3 py-3' }, [VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { eliminar(i); } }, [VEVA.icon('x', 14)])])
+    ]);
+  }
+
+  function renderDestinatarios() {
+    var header = VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc] flex items-center justify-between' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Destinatarios'])]);
+    if (state.saving) header.appendChild(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Guardando...']));
+
+    var body;
+    if (state.loading) {
+      body = VEVA.dom.el('div', { class: 'p-6 space-y-2' }, [1, 2, 3].map(function () { return VEVA.dom.el('div', { class: 'h-12 bg-[#f6f9fc] rounded-lg animate-pulse' }, []); }));
+    } else {
+      var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+        VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']),
+        VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']),
+        VEVA.dom.el('th', { class: 'px-5 py-2 text-center text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Activo']),
+        VEVA.dom.el('th', { class: 'px-5 py-2 w-10' }, [])
+      ])]);
+      var rows = state.lista.map(renderFilaDestinatario);
+      if (!state.lista.length) rows = [VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: '4', class: 'px-5 py-6 text-center text-[13px] text-[#697386]' }, ['Sin destinatarios. Agrega uno abajo.'])])];
+      body = VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, rows)]);
+    }
+
+    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    inEmail.value = state.newEmail;
+    inEmail.addEventListener('input', function (e) { state.newEmail = e.target.value; });
+    inEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') agregar(); });
+    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    inNombre.value = state.newNombre;
+    inNombre.addEventListener('input', function (e) { state.newNombre = e.target.value; });
+
+    var agregarForm = VEVA.dom.el('div', { class: 'px-5 py-4 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 flex flex-wrap gap-3 items-end' }, [
+      VEVA.dom.el('div', { class: 'flex-1 min-w-[200px] space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']), inEmail]),
+      VEVA.dom.el('div', { class: 'w-40 space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']), inNombre]),
+      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: agregar, disabled: state.newEmail.indexOf('@') < 0 ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
+    ]);
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [header, body, agregarForm]);
+  }
+
+  function renderEnvio() {
+    var scopeBtns = SCOPES.map(function (s) {
+      var active = state.sendScope === s.id;
+      return VEVA.dom.el('button', { class: 'px-4 py-2 rounded-lg text-[12px] font-medium transition-all border ' + (active ? 'bg-[#635bff] text-white border-[#635bff]' : 'bg-white text-[#697386] border-[#e6ebf1] hover:border-[#635bff]/40'), onClick: function () { state.sendScope = s.id; redraw(); } }, [s.label]);
+    });
+    var activos = state.lista.filter(function (r) { return r.activo; }).length;
+    var children = [
+      VEVA.dom.el('div', {}, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider mb-3' }, ['Alcance']), VEVA.dom.el('div', { class: 'flex flex-wrap gap-2' }, scopeBtns)]),
+      VEVA.dom.el('div', { class: 'flex items-center justify-between pt-4 border-t border-[#f6f9fc]' }, [
+        VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Destinatarios activos: ', VEVA.dom.el('span', { class: 'font-bold text-[#0a2540]' }, [String(activos)])]),
+        VEVA.dom.el('button', { class: 'flex items-center gap-2 px-6 py-2.5 bg-[#635bff] text-white rounded-lg text-[13px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-50', onClick: enviar, disabled: (state.sending || activos === 0) ? 'disabled' : null }, [VEVA.icon(state.sending ? 'loader' : 'send', 14, state.sending ? 'animate-spin' : ''), state.sending ? 'Enviando...' : 'Enviar Reporte'])
+      ])
+    ];
+    if (state.resultado) {
+      var ok = state.resultado.status === 'success';
+      children.push(VEVA.dom.el('div', { class: 'p-4 rounded-xl border flex items-start gap-3 ' + (ok ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100') }, [
+        VEVA.icon(ok ? 'check-circle' : 'alert-circle', 16, 'flex-shrink-0 mt-0.5 ' + (ok ? 'text-emerald-500' : 'text-red-500')),
+        VEVA.dom.el('p', { class: 'text-[13px] font-medium ' + (ok ? 'text-emerald-700' : 'text-red-700') }, [state.resultado.message])
+      ]));
+    }
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Enviar Reporte de Posicion'])]),
+      VEVA.dom.el('div', { class: 'p-6 space-y-5' }, children)
+    ]);
+  }
+
+  function renderTabReporte() {
+    return VEVA.dom.el('div', { class: 'space-y-6' }, [renderDestinatarios(), renderEnvio()]);
+  }
+
+  // =====================================================================
+  // Tab "CC de Pagos" (Bloque E, 2026-07-27) -- mismo patron exacto que
+  // View_NotificacionesPagos.html (selector de sociedad + tabla editable
+  // + alta multi-sociedad), adaptado a getListaCcPagos/guardarListaCcPagos.
+  // Prefijo `cc` en cada nombre para no chocar con el estado/funciones de
+  // la tab "Reporte de Posicion" que comparte este mismo archivo.
+  // =====================================================================
+
+  var SIN_ACENTOS_CC = new RegExp(String.fromCharCode(91) + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + String.fromCharCode(93), 'g');
+  function ccNormalizarRol(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(SIN_ACENTOS_CC, ''); }
+  function ccPuedeEditar() {
+    if (!state.ccUsuario) return false;
+    if (state.ccUsuario.catalogoVacio) return true;
+    var roles = (state.ccUsuario.roles || []).map(ccNormalizarRol);
+    return roles.indexOf(ccNormalizarRol('Tesorería')) >= 0 || roles.indexOf(ccNormalizarRol('Contador')) >= 0;
+  }
+
+  function ccCargar() {
+    state.ccCargado = true; state.ccLoading = true; state.ccError = null; redraw();
+    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getListaCcPagos'), VEVA.gas('getCatalogoCuentasPago')])
+      .then(function (res) {
+        var resUsuario = res[0], resLista = res[1], resCat = res[2];
+        if (!resLista || resLista.status !== 'success') throw new Error((resLista && resLista.message) || 'Error al cargar la lista de CC');
+        state.ccUsuario = (resUsuario && resUsuario.status === 'success') ? resUsuario.data : null;
+        state.ccListaCompleta = resLista.data;
+        var soc = {};
+        ((resCat && resCat.status === 'success') ? resCat.data : []).forEach(function (c) { if (c.nombreCorto) soc[c.nombreCorto] = true; });
+        state.ccSociedades = Object.keys(soc).sort();
+        if (!state.ccSociedadSel && state.ccSociedades.length) state.ccSociedadSel = state.ccSociedades[0];
+        if (state.ccSociedadSel) {
+          state.ccNuevoSociedades = {};
+          state.ccNuevoSociedades[state.ccSociedadSel] = true;
+        }
+      })
+      .catch(function (e) { state.ccError = String(e.message || e); })
+      .finally(function () { state.ccLoading = false; redraw(); });
+  }
+
+  function ccListaDeSociedad(sociedad) {
+    return state.ccListaCompleta.filter(function (r) { return r.sociedad === sociedad; });
+  }
+  function ccListaDeSociedadActual() { return ccListaDeSociedad(state.ccSociedadSel); }
+
+  function ccGuardarParaSociedad(sociedad, nuevaListaSociedad) {
+    return VEVA.gas('guardarListaCcPagos', { sociedad: sociedad, lista: nuevaListaSociedad })
+      .then(function (res) {
+        if (res.status !== 'success') return { ok: false, message: res.message };
+        var deOtras = state.ccListaCompleta.filter(function (r) { return r.sociedad !== sociedad; });
+        state.ccListaCompleta = deOtras.concat(nuevaListaSociedad.map(function (r) { return Object.assign({ sociedad: sociedad }, r); }));
+        return { ok: true };
+      })
+      .catch(function (e) { return { ok: false, message: String(e.message || e) }; });
+  }
+
+  function ccGuardar(nuevaListaSociedad) {
+    state.ccSaving = true; redraw();
+    ccGuardarParaSociedad(state.ccSociedadSel, nuevaListaSociedad)
+      .then(function (r) { if (!r.ok) state.ccError = r.message; })
+      .finally(function () { state.ccSaving = false; redraw(); });
+  }
+
+  function ccAgregar() {
+    if (state.ccNewEmail.indexOf('@') < 0) return;
+    var sociedadesDestino = Object.keys(state.ccNuevoSociedades).filter(function (s) { return state.ccNuevoSociedades[s]; });
+    if (!sociedadesDestino.length) {
+      state.ccError = 'Marca al menos una sociedad antes de agregar.';
+      redraw();
+      return;
+    }
+    var email = state.ccNewEmail.trim();
+    var nombre = state.ccNewNombre.trim();
+    state.ccNewEmail = ''; state.ccNewNombre = '';
+    state.ccSaving = true; state.ccError = null; redraw();
+
+    var erroresPorSociedad = [];
+    var cadena = Promise.resolve();
+    sociedadesDestino.forEach(function (soc) {
+      cadena = cadena.then(function () {
+        var listaSoc = ccListaDeSociedad(soc).concat([{ email: email, nombre: nombre, activo: true }]);
+        return ccGuardarParaSociedad(soc, listaSoc).then(function (r) { if (!r.ok) erroresPorSociedad.push(soc + ': ' + r.message); });
+      });
+    });
+    cadena.finally(function () {
+      state.ccSaving = false;
+      if (erroresPorSociedad.length) state.ccError = erroresPorSociedad.join(' · ');
+      redraw();
+    });
+  }
+
+  function ccToggleActivo(i) {
+    var lista = ccListaDeSociedadActual();
+    var nueva = lista.map(function (r, idx) { return idx === i ? Object.assign({}, r, { activo: !r.activo }) : r; });
+    ccGuardar(nueva);
+  }
+
+  function ccEliminar(i) {
+    var lista = ccListaDeSociedadActual();
+    var nueva = lista.filter(function (r, idx) { return idx !== i; });
+    ccGuardar(nueva);
+  }
+
+  function ccEditarCampo(i, campo, valor) {
+    var lista = ccListaDeSociedadActual();
+    var cambio = {};
+    cambio[campo] = valor;
+    var nueva = lista.map(function (r, idx) { return idx === i ? Object.assign({}, r, cambio) : r; });
+    ccGuardar(nueva);
+  }
+
+  function ccRenderSelectorSociedad() {
+    var sel = VEVA.dom.el('select', { class: 'text-[13px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff] font-semibold' },
+      state.ccSociedades.map(function (s) { return VEVA.dom.el('option', { value: s }, [s]); }));
+    sel.value = state.ccSociedadSel;
+    sel.addEventListener('change', function (e) {
+      state.ccSociedadSel = e.target.value;
+      state.ccNuevoSociedades = {};
+      state.ccNuevoSociedades[state.ccSociedadSel] = true;
+      redraw();
+    });
+    return VEVA.dom.el('div', { class: 'flex items-center gap-2.5' }, [
+      VEVA.dom.el('label', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Sociedad']),
+      sel
+    ]);
+  }
+
+  function ccRenderFilaDestinatario(r, i) {
+    var editable = ccPuedeEditar();
+    var claveFila = 'cc-row-' + r.email;
+    var celdaEmail, celdaNombre;
+    if (editable) {
+      var inE = VEVA.dom.el('input', { type: 'email', 'data-focus-key': claveFila + '-email', class: 'w-full text-[12px] font-mono border border-transparent hover:border-[#e6ebf1] focus:border-[#635bff] rounded px-1.5 py-1 outline-none bg-transparent' }, []);
+      inE.value = r.email;
+      inE.addEventListener('change', function (e) { if (e.target.value.trim() && e.target.value.indexOf('@') >= 0) ccEditarCampo(i, 'email', e.target.value.trim()); else e.target.value = r.email; });
+      celdaEmail = VEVA.dom.el('td', { class: 'px-2 py-1.5' }, [inE]);
+
+      var inN = VEVA.dom.el('input', { type: 'text', 'data-focus-key': claveFila + '-nombre', class: 'w-full text-[12px] border border-transparent hover:border-[#e6ebf1] focus:border-[#635bff] rounded px-1.5 py-1 outline-none bg-transparent text-[#697386]' }, []);
+      inN.value = r.nombre || '';
+      inN.addEventListener('change', function (e) { ccEditarCampo(i, 'nombre', e.target.value.trim()); });
+      celdaNombre = VEVA.dom.el('td', { class: 'px-2 py-1.5' }, [inN]);
+    } else {
+      celdaEmail = VEVA.dom.el('td', { class: 'px-5 py-3 font-mono text-[12px]' }, [r.email]);
+      celdaNombre = VEVA.dom.el('td', { class: 'px-5 py-3 text-[#697386]' }, [r.nombre || '—']);
+    }
+
+    var toggle = VEVA.dom.el('button', {
+      class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (r.activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]') + (editable ? '' : ' opacity-50 cursor-not-allowed'),
+      onClick: editable ? function () { ccToggleActivo(i); } : null
+    }, [
+      VEVA.dom.el('span', { class: 'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ' + (r.activo ? 'left-5' : 'left-0.5') }, [])
+    ]);
+    return VEVA.dom.el('tr', { class: r.activo ? '' : 'opacity-50' }, [
+      celdaEmail,
+      celdaNombre,
+      VEVA.dom.el('td', { class: 'px-5 py-3 text-center' }, [toggle]),
+      VEVA.dom.el('td', { class: 'px-3 py-3' }, [editable ? VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { ccEliminar(i); } }, [VEVA.icon('x', 14)]) : null])
+    ]);
+  }
+
+  function ccRenderTablaDestinatarios(lista) {
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']),
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']),
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-center text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Activo']),
+      VEVA.dom.el('th', { class: 'px-5 py-2 w-10' }, [])
+    ])]);
+    var rows = lista.map(ccRenderFilaDestinatario);
+    if (!lista.length) rows = [VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: '4', class: 'px-5 py-6 text-center text-[13px] text-[#697386]' }, ['Sin copias configuradas para esta sociedad. Agrega una abajo.'])])];
+    return VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, rows)]);
+  }
+
+  function ccRenderChecklistSociedades() {
+    if (state.ccSociedades.length <= 1) return null;
+    var checks = state.ccSociedades.map(function (soc) {
+      var cb = VEVA.dom.el('input', { type: 'checkbox', class: 'accent-[#635bff]' }, []);
+      cb.checked = !!state.ccNuevoSociedades[soc];
+      cb.addEventListener('change', function (e) { state.ccNuevoSociedades[soc] = e.target.checked; redraw(); });
+      return VEVA.dom.el('label', { class: 'flex items-center gap-1.5 text-[11px] text-[#0a2540] cursor-pointer' }, [cb, soc]);
+    });
+    return VEVA.dom.el('div', { class: 'pt-1' }, [
+      VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider mb-1.5' }, ['Agregar a estas sociedades']),
+      VEVA.dom.el('div', { class: 'flex flex-wrap gap-x-4 gap-y-1.5' }, checks)
+    ]);
+  }
+
+  function ccRenderAgregarForm() {
+    if (!ccPuedeEditar()) {
+      return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo Tesorería o Contador pueden editar esta lista.']);
+    }
+    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'cc-email', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    inEmail.value = state.ccNewEmail;
+    inEmail.addEventListener('input', function (e) { state.ccNewEmail = e.target.value; redraw(); });
+    inEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') ccAgregar(); });
+    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', 'data-focus-key': 'cc-nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    inNombre.value = state.ccNewNombre;
+    inNombre.addEventListener('input', function (e) { state.ccNewNombre = e.target.value; });
+
+    var camposForm = VEVA.dom.el('div', { class: 'flex flex-wrap gap-3 items-end' }, [
+      VEVA.dom.el('div', { class: 'flex-1 min-w-[200px] space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']), inEmail]),
+      VEVA.dom.el('div', { class: 'w-40 space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']), inNombre]),
+      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: ccAgregar, disabled: state.ccNewEmail.indexOf('@') < 0 ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
+    ]);
+
+    var formChildren = [camposForm, ccRenderChecklistSociedades()].filter(Boolean);
+    return VEVA.dom.el('div', { class: 'px-5 py-4 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 space-y-3' }, formChildren);
+  }
+
+  function ccRenderDestinatarios() {
+    var lista = ccListaDeSociedadActual();
+    var header = VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc] flex items-center justify-between' }, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Copia (CC) — ' + (state.ccSociedadSel || '')])
+    ]);
+    if (state.ccSaving) header.appendChild(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Guardando...']));
+
+    var body = state.ccLoading
+      ? VEVA.dom.el('div', { class: 'p-6 space-y-2' }, [1, 2, 3].map(function () { return VEVA.dom.el('div', { class: 'h-12 bg-[#f6f9fc] rounded-lg animate-pulse' }, []); }))
+      : ccRenderTablaDestinatarios(lista);
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [header, body, ccRenderAgregarForm()]);
+  }
+
+  function ccRenderNota() {
+    return VEVA.dom.el('div', { class: 'px-4 py-3 bg-[#f6f9fc] border border-[#e6ebf1] rounded-xl text-[12px] text-[#697386] flex items-start gap-2.5' }, [
+      VEVA.icon('users', 14, 'text-[#697386] flex-shrink-0 mt-0.5'),
+      VEVA.dom.el('span', {}, [
+        'Quienes estén activos aquí van en copia (CC) en los 7 tipos de correo de pagos de esa sociedad: ',
+        VEVA.dom.el('b', {}, ['cargada, revisión, autorización, liberación a banco, subida al banco, pago aplicado y rechazo.']),
+        ' Es distinto de "Notificaciones de Pagos" (esa es el destinatario principal). Para copiar a alguien solo en UNA propuesta puntual, agrégalo al cargar esa propuesta, en la pantalla de Pagos.'
+      ])
+    ]);
+  }
+
+  function ccRenderTab() {
+    var children = [ccRenderNota()];
+    if (state.ccError) {
+      children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3' }, [VEVA.icon('alert-circle', 16, 'text-red-500 flex-shrink-0'), VEVA.dom.el('p', { class: 'text-[13px] text-red-700' }, [state.ccError])]));
+    }
+    if (!state.ccLoading && !state.ccSociedades.length) {
+      children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay sociedades en el catálogo de cuentas todavía.']));
+      return VEVA.dom.el('div', { class: 'space-y-6' }, children);
+    }
+    children.push(VEVA.dom.el('div', { class: 'flex items-center justify-end' }, [ccRenderSelectorSociedad()]));
+    children.push(ccRenderDestinatarios());
+    return VEVA.dom.el('div', { class: 'space-y-6' }, children);
+  }
+
+  // ---- Contenedor: pestanas internas + redraw compartido ----
+
+  function renderTabs() {
+    var tabs = [
+      { id: 'reporte', label: 'Reporte de Posición' },
+      { id: 'cc-pagos', label: 'CC de Pagos' }
+    ];
+    return VEVA.dom.el('div', { class: 'flex gap-1 border-b border-[#e6ebf1]' }, tabs.map(function (t) {
+      var active = state.activeSubTab === t.id;
+      return VEVA.dom.el('button', {
+        class: 'px-4 py-2.5 text-[12.5px] font-semibold border-b-2 -mb-px transition-colors ' + (active ? 'border-[#635bff] text-[#635bff]' : 'border-transparent text-[#697386] hover:text-[#0a2540]'),
+        onClick: function () {
+          state.activeSubTab = t.id;
+          if (t.id === 'cc-pagos' && !state.ccCargado) ccCargar();
+          redraw();
+        }
+      }, [t.label]);
+    }));
+  }
+
+  function _redrawInner() {
+    var root = document.getElementById('view-listadist-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Lista de Distribucion']),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Gestiona destinatarios de reportes y de correos de pagos'])
+    ]));
+    root.appendChild(renderTabs());
+    if (state.activeSubTab === 'cc-pagos') {
+      root.appendChild(ccRenderTab());
+      return;
+    }
+    if (state.error) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3' }, [VEVA.icon('alert-circle', 16, 'text-red-500 flex-shrink-0'), VEVA.dom.el('p', { class: 'text-[13px] text-red-700' }, [state.error])]));
+    }
+    root.appendChild(renderTabReporte());
+  }
+
+  /** Foco preservado al redibujar (necesario ahora que la tab CC de Pagos
+   * tiene inputs editables que redibujan, mismo patron ya usado en
+   * View_NotificacionesPagos.html/View_Pagos.html). */
+  function redraw() {
+    var activo = document.activeElement;
+    var focusKey = null, selStart = null, selEnd = null;
+    if (activo && activo.hasAttribute && activo.hasAttribute('data-focus-key')) {
+      focusKey = activo.getAttribute('data-focus-key');
+      if (typeof activo.selectionStart === 'number') { selStart = activo.selectionStart; selEnd = activo.selectionEnd; }
+    }
+
+    _redrawInner();
+
+    if (focusKey) {
+      var el = document.querySelector('[data-focus-key="' + focusKey + '"]');
+      if (el) {
+        el.focus();
+        if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selEnd); } catch (e) { } }
+      }
+    }
+  }
+
+  VEVA.registerView('lista-dist', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-listadist-root', class: 'space-y-6 max-w-3xl' }, []));
+      cargarLista();
+    },
+    destroy: function () {}
+  });
+})();
+</script>

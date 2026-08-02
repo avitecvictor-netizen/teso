@@ -1,0 +1,56 @@
+<script>
+/**
+ * VEVA - Tab admin: Recalcular Movimientos desde parser.
+ * Responsabilidad unica: llama recalcularMovPeriodos (backend/Codigo.gs).
+ * Puerto directo de AdminRecalcMovs (_source/Index.jsx:4306). Sub-vista de
+ * 'admin-flujo' -- se registra en VEVA.adminTabs.
+ *
+ * Backend citado: recalcularMovPeriodos (Codigo.gs).
+ */
+(function () {
+  var state = { desde: '', hasta: '', loading: false, msg: null };
+
+  function recalcular() {
+    if (!state.desde || !state.hasta || state.desde > state.hasta) return;
+    state.loading = true; state.msg = null; redraw();
+    VEVA.gas('recalcularMovPeriodos', { desde: state.desde, hasta: state.hasta })
+      .then(function (r) { state.msg = { ok: r.status === 'success', text: r.message }; })
+      .catch(function (e) { state.msg = { ok: false, text: String(e) }; })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function redraw() {
+    var root = document.getElementById('admintab-recalcmovs-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+    var inputCls = 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 bg-white outline-none focus:border-[#635bff]';
+    var valid = state.desde && state.hasta && state.desde <= state.hasta;
+
+    var inDesde = VEVA.dom.el('input', { type: 'month', class: inputCls }, []);
+    inDesde.value = state.desde; inDesde.addEventListener('change', function (e) { state.desde = e.target.value; redraw(); });
+    var inHasta = VEVA.dom.el('input', { type: 'month', class: inputCls }, []);
+    inHasta.value = state.hasta; inHasta.addEventListener('change', function (e) { state.hasta = e.target.value; redraw(); });
+
+    var children = [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h3', { class: 'text-[15px] font-semibold' }, ['Recalcular Movimientos desde parser']),
+        VEVA.dom.el('p', { class: 'text-[12px] text-[#697386] mt-1' }, ['Re-aplica las reglas actuales de REGLAS_PARSER a los movimientos del rango indicado. Omite filas clasificadas manualmente (CLASIFICACION_MANUAL=SI) y traspasos/intercias detectados por cuenta (P1/P2). Al terminar reconstruye SUM_MOV y SUM_EFE automaticamente.'])
+      ]),
+      VEVA.dom.el('div', { class: 'flex flex-wrap items-end gap-4' }, [
+        VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[11px] text-[#697386] font-medium' }, ['Desde']), inDesde]),
+        VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[11px] text-[#697386] font-medium' }, ['Hasta']), inHasta]),
+        VEVA.dom.el('button', { class: 'px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium flex items-center gap-1.5 disabled:opacity-40', onClick: recalcular, disabled: (state.loading || !valid) ? 'disabled' : null }, [VEVA.icon(state.loading ? 'loader' : 'refresh-cw', 12, state.loading ? 'animate-spin' : ''), state.loading ? 'Procesando...' : 'Recalcular Movimientos'])
+      ])
+    ];
+    if (state.msg) children.push(VEVA.dom.el('div', { class: 'rounded-lg px-4 py-3 text-[12px] ' + (state.msg.ok ? 'bg-[#e3fcef] text-[#1a7f4e]' : 'bg-[#fce8e8] text-[#c0392b]') }, [state.msg.text]));
+
+    root.appendChild(VEVA.dom.el('div', { class: 'space-y-6 mt-4' }, children));
+  }
+
+  VEVA.adminTabs = VEVA.adminTabs || {};
+  VEVA.adminTabs.recalcmov = {
+    render: function (mount) { mount.appendChild(VEVA.dom.el('div', { id: 'admintab-recalcmovs-root' }, [])); redraw(); },
+    destroy: function () {}
+  };
+})();
+</script>

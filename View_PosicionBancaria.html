@@ -1,0 +1,335 @@
+<script>
+/**
+ * VEVA - Vista: Posicion Bancaria Consolidada.
+ * Responsabilidad unica: consultar getBankingPosition (backend/Codigo.gs:20,
+ * sin modificar) y pintar KPIs, 2 graficas de anillo y detalle expandible
+ * por tipo/sociedad/cuenta. Puerto directo (paridad completa, 2026-07-25)
+ * de PosicionBancaria (_source/Index.jsx:223).
+ *
+ * Contrato de datos verificado contra backend/Codigo.gs::getBankingPosition:
+ *   { status: 'success'|'error', message: string,
+ *     data: {
+ *       fecha, ultimaDisponible, penultimaDisponible, tc_usd,
+ *       societies: [{ id, name, shortName, type, totalMxn,
+ *         currencies: [{ currencyCode, tc, totalMxn, entries: [
+ *           { bankName, cuenta, originalAmount, mxnAmount, moneda, tc }
+ *         ]}]
+ *       }],
+ *       cobranzaPorSociedad: [{ abr, mxn, usd }],
+ *       fechasCobranza: ['yyyy-MM-dd', ...],
+ *       _dbg: { headers, conteos: { total, sinFecha, fueraRango, fueraLimite, sinSociedad, ok } }
+ *     }
+ *   }
+ *
+ * Nota: el React original tambien calculaba `outerRingData` (anillo
+ * exterior de sociedades por banco) y `totalCuentas`, pero ninguno de los
+ * dos se usaba en el render (codigo muerto en la fuente) -- no se portan
+ * aqui, por regla anti-invencion (no agregar lo que ni el original pinta).
+ */
+(function () {
+  var CHART_COLORS = ['#635bff', '#10b981', '#f59e0b', '#06b6d4', '#ef4444'];
+  var BANK_COLORS = ['#635bff', '#10b981', '#f59e0b', '#06b6d4'];
+  var TIPO_ORDER = ['Operativas', 'JV', 'No Operativas', 'Restringidas', 'Otras'];
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  var state = { data: null, loading: true, error: null, expanded: {}, selectedDate: '', cobHover: false };
+
+  function loadData(fecha) {
+    state.loading = true; state.error = null; redraw();
+    VEVA.gas('getBankingPosition', fecha ? { fecha: fecha } : {})
+      .then(function (res) {
+        if (res.status !== 'success') throw new Error(res.message || 'Error al cargar datos');
+        state.data = res.data;
+        if (!fecha && res.data.ultimaDisponible) state.selectedDate = res.data.ultimaDisponible;
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function toggle(id) { state.expanded[id] = !state.expanded[id]; redraw(); }
+
+  function fmtDia(fechas) {
+    if (!fechas || !fechas.length) return '';
+    var M = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+    var f0 = String(fechas[0]).split('-'), fN = String(fechas[fechas.length - 1]).split('-');
+    var d0 = parseInt(f0[2]), dN = parseInt(fN[2]);
+    var m0 = M[parseInt(f0[1]) - 1], mN = M[parseInt(fN[1]) - 1];
+    if (fechas.length === 1) return d0 + ' ' + m0;
+    if (m0 === mN) return d0 + '-' + dN + ' ' + m0;
+    return d0 + ' ' + m0 + '-' + dN + ' ' + mN;
+  }
+
+  function getDerived() {
+    var d = state.data || { fecha: '', tc_usd: 1, societies: [], cobranzaPorSociedad: [] };
+    var totalMxn = d.societies.reduce(function (a, s) { return a + s.totalMxn; }, 0);
+    var cobData = d.cobranzaPorSociedad || [];
+    var cobTotalMxn = cobData.reduce(function (a, s) { return a + (s.mxn || 0); }, 0);
+    var cobTotalUsd = cobData.reduce(function (a, s) { return a + (s.usd || 0); }, 0);
+
+    var byType = {};
+    d.societies.forEach(function (s) { byType[s.type] = (byType[s.type] || 0) + s.totalMxn; });
+
+    var currMap = {};
+    d.societies.forEach(function (s) { s.currencies.forEach(function (c) { currMap[c.currencyCode] = (currMap[c.currencyCode] || 0) + c.totalMxn; }); });
+    var currencyData = Object.keys(currMap).map(function (k) { return { name: k, value: currMap[k] }; });
+
+    var bankMap = {};
+    d.societies.forEach(function (s) { s.currencies.forEach(function (c) { c.entries.forEach(function (e) { bankMap[e.bankName] = (bankMap[e.bankName] || 0) + e.mxnAmount; }); }); });
+    var innerRingData = Object.keys(bankMap).map(function (k) { return { name: k, value: bankMap[k] }; }).sort(function (a, b) { return b.value - a.value; });
+
+    var typeMap = {}; var typeOrder = [];
+    d.societies.forEach(function (s) {
+      var t = s.type || 'Otras';
+      if (!typeMap[t]) { typeMap[t] = { total: 0, societies: [] }; typeOrder.push(t); }
+      typeMap[t].societies.push(s); typeMap[t].total += s.totalMxn;
+    });
+    var typeGroups = TIPO_ORDER.filter(function (t) { return typeMap[t]; }).map(function (t) { return { tipo: t, total: typeMap[t].total, societies: typeMap[t].societies }; });
+
+    return { d: d, totalMxn: totalMxn, cobData: cobData, cobTotalMxn: cobTotalMxn, cobTotalUsd: cobTotalUsd, byType: byType, currencyData: currencyData, innerRingData: innerRingData, typeGroups: typeGroups };
+  }
+
+  // ---- Grafica de anillo (donut) SVG nativa, sin librerias ----
+  function polarToCartesian(cx, cy, r, angleDeg) {
+    var rad = (angleDeg - 90) * Math.PI / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  }
+  function donutSlicePath(cx, cy, innerR, outerR, startAngle, endAngle) {
+    var so = polarToCartesian(cx, cy, outerR, endAngle);
+    var eo = polarToCartesian(cx, cy, outerR, startAngle);
+    var si = polarToCartesian(cx, cy, innerR, startAngle);
+    var ei = polarToCartesian(cx, cy, innerR, endAngle);
+    var largeArc = (endAngle - startAngle) <= 180 ? '0' : '1';
+    return ['M', so.x, so.y, 'A', outerR, outerR, 0, largeArc, 0, eo.x, eo.y,
+      'L', si.x, si.y, 'A', innerR, innerR, 0, largeArc, 1, ei.x, ei.y, 'Z'].join(' ');
+  }
+  function donutChart(data, colors, size) {
+    var innerR = size * 0.27, outerR = size * 0.39, cx = size / 2, cy = size / 2;
+    var total = data.reduce(function (a, x) { return a + x.value; }, 0) || 1;
+    var svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
+    svg.setAttribute('width', '100%'); svg.setAttribute('height', '100%');
+    var angle = 0;
+    data.forEach(function (item, i) {
+      var span = (item.value / total) * 360;
+      var pad = Math.min(3, span * 0.15);
+      var s = angle + pad / 2, e = angle + span - pad / 2;
+      if (e > s) {
+        var path = document.createElementNS(SVGNS, 'path');
+        path.setAttribute('d', donutSlicePath(cx, cy, innerR, outerR, s, e));
+        path.setAttribute('fill', colors[i % colors.length]);
+        var title = document.createElementNS(SVGNS, 'title');
+        title.textContent = item.name + ': ' + VEVA.fmt.k(item.value);
+        path.appendChild(title);
+        svg.appendChild(path);
+      }
+      angle += span;
+    });
+    return svg;
+  }
+  function chartLegend(data, colors) {
+    return VEVA.dom.el('div', { class: 'flex flex-wrap justify-center gap-x-4 gap-y-1 mt-2' }, data.map(function (item, i) {
+      var sw = VEVA.dom.el('span', { class: 'w-2.5 h-2.5 rounded-sm inline-block flex-shrink-0' }, []);
+      sw.style.backgroundColor = colors[i % colors.length];
+      return VEVA.dom.el('div', { class: 'flex items-center gap-1.5 text-[11px] text-[#697386]' }, [sw, item.name]);
+    }));
+  }
+
+  // ---- Render: header con selector de fecha ----
+  function renderHeaderConFiltro(titulo, subtitulo) {
+    var inFecha = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 bg-white outline-none focus:border-[#635bff]' }, []);
+    inFecha.value = state.selectedDate;
+    inFecha.addEventListener('change', function (e) { state.selectedDate = e.target.value; });
+    return VEVA.dom.el('div', { class: 'flex items-center justify-between' }, [
+      VEVA.dom.el('div', {}, [VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, [titulo]), subtitulo]),
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        VEVA.dom.el('label', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Fecha']),
+        inFecha,
+        VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all', onClick: function () { loadData(state.selectedDate); } }, [VEVA.icon('search', 12), 'Consultar'])
+      ])
+    ]);
+  }
+
+  function renderSkeleton() {
+    return VEVA.dom.el('div', { class: 'space-y-6' }, [
+      VEVA.dom.el('div', { class: 'flex items-center justify-between' }, [VEVA.dom.el('div', { class: 'space-y-2' }, [
+        VEVA.dom.el('div', { class: 'h-7 w-64 bg-gray-100 rounded-lg animate-pulse' }, []),
+        VEVA.dom.el('div', { class: 'h-4 w-40 bg-gray-100 rounded animate-pulse' }, [])
+      ])]),
+      VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-4' }, [1, 2, 3, 4].map(function () { return VEVA.dom.el('div', { class: 'h-20 bg-white rounded-xl border border-[#e6ebf1] animate-pulse' }, []); })),
+      VEVA.dom.el('div', { class: 'grid grid-cols-1 lg:grid-cols-2 gap-6' }, [1, 2].map(function () { return VEVA.dom.el('div', { class: 'h-64 bg-white rounded-xl border border-[#e6ebf1] animate-pulse' }, []); }))
+    ]);
+  }
+
+  function renderError() {
+    return VEVA.dom.el('div', { class: 'space-y-4' }, [
+      VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-5 rounded-xl flex items-center justify-between' }, [
+        VEVA.dom.el('div', { class: 'flex items-center gap-3 text-red-700' }, [VEVA.icon('alert-circle', 18, 'text-red-500 flex-shrink-0'), VEVA.dom.el('p', { class: 'text-[13px] font-medium' }, [state.error])]),
+        VEVA.dom.el('button', { class: 'text-[12px] font-bold text-red-600 hover:underline', onClick: function () { loadData(); } }, ['Reintentar'])
+      ])
+    ]);
+  }
+
+  function renderSinDatos(d) {
+    var wrap = VEVA.dom.el('div', { class: 'space-y-4' }, [renderHeaderConFiltro('Posicion Bancaria Consolidada', null)]);
+    var card = [VEVA.icon('calendar-x', 32, 'text-[#e6ebf1] mx-auto'), VEVA.dom.el('p', { class: 'text-[14px] font-semibold text-[#0a2540]' }, ['Sin datos bancarios para ' + state.selectedDate])];
+    if (d.ultimaDisponible) {
+      card.push(VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Ultima fecha disponible: ', VEVA.dom.el('button', { class: 'text-[#635bff] font-bold hover:underline', onClick: function () { state.selectedDate = d.ultimaDisponible; loadData(d.ultimaDisponible); } }, [d.ultimaDisponible])]));
+    }
+    if (d._dbg && d._dbg.conteos) {
+      var c = d._dbg.conteos;
+      var lines = ['HIST  total=' + c.total + '  sin-mapeo=' + c.sinSociedad + '  otra-fecha=' + c.fueraLimite + '  ok=' + c.ok];
+      if (c.sinSociedad > 0) lines.push('Cuentas sin mapeo en CAT — recarga con modo Reemplazar');
+      else if (c.fueraLimite === c.total) lines.push('No se han cargado datos para esta fecha');
+      card.push(VEVA.dom.el('div', { class: 'mt-3 inline-block bg-[#f6f9fc] border border-[#e6ebf1] rounded-lg px-4 py-2' }, [VEVA.dom.el('pre', { class: 'text-[11px] text-[#697386] text-left whitespace-pre' }, [lines.join('\n')])]));
+    }
+    wrap.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center space-y-3' }, card));
+    return wrap;
+  }
+
+  function renderKpis(der) {
+    var cards = [VEVA.dom.el('div', { class: 'bg-white p-4 rounded-xl border border-[#e6ebf1] shadow-sm col-span-2 md:col-span-1 xl:col-span-2' }, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider mb-1' }, ['Total']),
+      VEVA.dom.el('p', { class: 'text-xl font-bold text-[#635bff]' }, [VEVA.fmt.mxn(der.totalMxn)])
+    ])];
+    ['Operativas', 'JV', 'No Operativas', 'Restringidas'].forEach(function (label) {
+      cards.push(VEVA.dom.el('div', { class: 'bg-white p-4 rounded-xl border border-[#e6ebf1] shadow-sm' }, [
+        VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider mb-1' }, [label]),
+        VEVA.dom.el('p', { class: 'text-[15px] font-bold text-[#0a2540]' }, [VEVA.fmt.mxn(der.byType[label] || 0)])
+      ]));
+    });
+    cards.push(renderCobranzaCard(der));
+    return VEVA.dom.el('div', { class: 'grid grid-cols-2 md:grid-cols-3 xl:grid-cols-8 gap-3' }, cards);
+  }
+
+  function renderCobranzaCard(der) {
+    var d = der.d;
+    var headRow = VEVA.dom.el('div', { class: 'flex justify-between items-start' }, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Cobranza' + (d.fechasCobranza && d.fechasCobranza.length ? ' · ' + fmtDia(d.fechasCobranza) : '')]),
+      VEVA.icon('arrow-right', 12, 'text-emerald-500' + (state.cobHover ? '' : ' opacity-0'))
+    ]);
+    var body;
+    if (der.cobTotalMxn > 0 || der.cobTotalUsd > 0) {
+      var bodyChildren = [VEVA.dom.el('p', { class: 'text-[17px] font-bold text-emerald-600 leading-tight' }, [VEVA.fmt.mxn(der.cobTotalMxn)])];
+      if (der.cobTotalUsd > 0) bodyChildren.push(VEVA.dom.el('p', { class: 'text-[11px] text-blue-500 font-mono' }, ['USD ' + der.cobTotalUsd.toLocaleString('es-MX', { maximumFractionDigits: 0 })]));
+      body = VEVA.dom.el('div', { class: 'mt-1' }, bodyChildren);
+    } else {
+      body = VEVA.dom.el('div', { class: 'mt-2' }, [VEVA.dom.el('p', { class: 'text-[13px] font-semibold text-emerald-600' }, ['Ver movimientos'])]);
+    }
+    var card = VEVA.dom.el('div', {
+      class: 'bg-white p-4 rounded-xl border border-[#e6ebf1] shadow-sm cursor-pointer hover:border-emerald-200 hover:shadow-md transition-all col-span-2 xl:col-span-2 relative',
+      onClick: function () { VEVA.router.go('cobranza'); }
+    }, [headRow, body]);
+    card.addEventListener('mouseenter', function () { state.cobHover = true; redraw(); });
+    card.addEventListener('mouseleave', function () { state.cobHover = false; redraw(); });
+
+    if (state.cobHover && der.cobData.length) {
+      var popup = VEVA.dom.el('div', { class: 'absolute bottom-full left-0 mb-1.5 bg-white border border-[#e6ebf1] rounded-xl shadow-xl p-3 z-50 min-w-[180px]', onClick: function (e) { e.stopPropagation(); } },
+        der.cobData.map(function (s) {
+          var valSpans = [VEVA.dom.el('span', { class: 'font-mono text-emerald-600 whitespace-nowrap' }, [VEVA.fmt.k(s.mxn)])];
+          if (s.usd > 0) valSpans.push(VEVA.dom.el('span', { class: 'text-blue-400 ml-1' }, [VEVA.fmt.k(s.usd) + 'USD']));
+          return VEVA.dom.el('div', { class: 'flex justify-between items-center text-[11px] gap-3 py-0.5' }, [
+            VEVA.dom.el('span', { class: 'font-bold text-[#635bff] text-[10px]' }, [s.abr]),
+            VEVA.dom.el('span', {}, valSpans)
+          ]);
+        }));
+      card.appendChild(popup);
+    }
+    return card;
+  }
+
+  function renderCharts(der) {
+    var chart1 = VEVA.dom.el('div', { class: 'bg-white p-6 rounded-xl border border-[#e6ebf1] shadow-sm' }, [
+      VEVA.dom.el('p', { class: 'text-[13px] font-bold mb-4' }, ['Exposicion por Moneda']),
+      VEVA.dom.el('div', { style: 'height:220px' }, [donutChart(der.currencyData, CHART_COLORS, 220)]),
+      chartLegend(der.currencyData, CHART_COLORS)
+    ]);
+
+    var usdEntry = der.currencyData.filter(function (c) { return c.name === 'USD'; })[0];
+    var chart2Children = [VEVA.dom.el('p', { class: 'text-[13px] font-bold mb-1' }, ['Saldo por Banco'])];
+    if (usdEntry) {
+      chart2Children.push(VEVA.dom.el('p', { class: 'text-[11px] text-[#697386] mb-3' }, ['USD moneda origen: ', VEVA.dom.el('span', { class: 'font-bold text-[#0a2540]' }, [VEVA.fmt.mxn(usdEntry.value)]), ' equiv. MXN']));
+    } else {
+      chart2Children.push(VEVA.dom.el('div', { class: 'mb-3' }, []));
+    }
+    chart2Children.push(VEVA.dom.el('div', { style: 'height:210px' }, [donutChart(der.innerRingData, BANK_COLORS, 210)]));
+    chart2Children.push(chartLegend(der.innerRingData, BANK_COLORS));
+    var chart2 = VEVA.dom.el('div', { class: 'bg-white p-6 rounded-xl border border-[#e6ebf1] shadow-sm' }, chart2Children);
+
+    return VEVA.dom.el('div', { class: 'grid grid-cols-1 lg:grid-cols-2 gap-6' }, [chart1, chart2]);
+  }
+
+  function renderEntry(entry) {
+    var parts = [VEVA.dom.bankBadge(entry.bankName), VEVA.dom.el('span', { class: 'text-[11px] font-mono text-[#697386] w-16' }, [entry.cuenta]), VEVA.dom.el('span', { class: 'flex-1' }, [])];
+    if (entry.moneda !== 'MXN') {
+      parts.push(VEVA.dom.el('span', { class: 'text-[10px] text-[#697386] font-mono mr-4' }, [entry.moneda + ' ' + entry.originalAmount.toLocaleString('es-MX', { minimumFractionDigits: 2 }) + ' × ' + entry.tc]));
+    }
+    parts.push(VEVA.dom.el('span', { class: 'text-[12px] font-bold font-mono text-[#0a2540] w-32 text-right' }, [VEVA.fmt.mxn(entry.mxnAmount)]));
+    return VEVA.dom.el('div', { class: 'flex items-center px-5 py-0.5 gap-2 border-b border-[#f6f9fc] last:border-0 hover:bg-[#fafbff]' }, parts);
+  }
+
+  function renderSociedad(soc) {
+    var isOpen = !!state.expanded[soc.id];
+    var numCuentas = soc.currencies.reduce(function (a, c) { return a + c.entries.length; }, 0);
+    var head = VEVA.dom.el('div', { class: 'px-5 py-1.5 flex justify-between items-center cursor-pointer group hover:bg-[#f6f9fc] transition-colors', onClick: function () { toggle(soc.id); } }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        VEVA.icon(isOpen ? 'chevron-down' : 'chevron-right', 12, 'text-[#697386] flex-shrink-0'),
+        VEVA.dom.el('span', { class: 'text-[13px] font-semibold' }, [soc.name]),
+        VEVA.dom.el('span', { class: 'text-[10px] text-[#697386]' }, [numCuentas + 'c'])
+      ]),
+      VEVA.dom.el('span', { class: 'text-[13px] font-bold font-mono' }, [VEVA.fmt.mxn(soc.totalMxn)])
+    ]);
+    var wrap = VEVA.dom.el('div', {}, [head]);
+    if (isOpen) {
+      var entries = [];
+      soc.currencies.forEach(function (curr) { curr.entries.forEach(function (e) { entries.push(Object.assign({}, e, { moneda: curr.currencyCode, tc: curr.tc })); }); });
+      wrap.appendChild(VEVA.dom.el('div', { class: 'border-t border-[#f0f2f8]' }, entries.map(renderEntry)));
+    }
+    return wrap;
+  }
+
+  function renderDetalle(der) {
+    var groups = der.typeGroups.map(function (group) {
+      return VEVA.dom.el('div', { class: 'mb-3 rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+        VEVA.dom.el('div', { class: 'flex justify-between items-center px-5 py-2 bg-[#f0f2f8] border-b border-[#e2e5ef]' }, [
+          VEVA.dom.el('span', { class: 'text-[11px] font-bold text-[#0a2540] uppercase tracking-wider' }, [group.tipo]),
+          VEVA.dom.el('span', { class: 'text-[12px] font-bold font-mono text-[#0a2540]' }, [VEVA.fmt.mxn(group.total)])
+        ]),
+        VEVA.dom.el('div', { class: 'divide-y divide-[#f6f9fc] bg-white' }, group.societies.map(renderSociedad))
+      ]);
+    });
+    return VEVA.dom.el('div', {}, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-widest flex items-center gap-2 mb-3' }, [
+        VEVA.dom.el('span', { class: 'w-2 h-2 rounded-full bg-[#635bff] inline-block' }, []), 'Detalle por Tipo y Sociedad'
+      ])
+    ].concat(groups));
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-posicion-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    if (state.loading) { root.appendChild(renderSkeleton()); return; }
+    if (state.error) { root.appendChild(renderError()); return; }
+
+    var der = getDerived();
+    if (!der.d.societies.length && state.selectedDate) { root.appendChild(renderSinDatos(der.d)); return; }
+
+    var subtitulo = VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['TC USD: ' + der.d.tc_usd]);
+    root.appendChild(VEVA.dom.el('div', { class: 'space-y-6' }, [
+      renderHeaderConFiltro('Posicion Bancaria Consolidada', subtitulo),
+      renderKpis(der),
+      renderCharts(der),
+      renderDetalle(der)
+    ]));
+  }
+
+  VEVA.registerView('posicion', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-posicion-root' }, []));
+      loadData();
+    },
+    destroy: function () { /* sin listeners globales que limpiar en esta vista */ }
+  });
+})();
+</script>

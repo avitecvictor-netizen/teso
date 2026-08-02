@@ -1,0 +1,122 @@
+<script>
+/**
+ * VEVA - Tab admin: Saldos Iniciales.
+ * Responsabilidad unica: CRUD de SALDO_INICIAL con bloqueo por periodo.
+ * Puerto directo de AdminSaldos (_source/Index.jsx:4364). Sub-vista de
+ * 'admin-flujo' -- se registra en VEVA.adminTabs.
+ *
+ * Backends citados: getSaldoInicialAdmin, setSaldoInicial,
+ * bloquearPeriodoSaldo (Svc_Flujo.gs). Campos verificados: cuenta, banco,
+ * sociedad, periodo, saldo, bloqueado.
+ */
+(function () {
+  var state = { rows: [], loading: false, error: '', filtPer: '', editando: null, saving: false, msg: '' };
+
+  function cargar() {
+    state.loading = true; state.error = ''; redraw();
+    VEVA.gas('getSaldoInicialAdmin', { periodo: state.filtPer })
+      .then(function (r) { if (r.status !== 'success') throw new Error(r.message); state.rows = r.data; })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function bloquear(periodo) {
+    state.saving = true; redraw();
+    VEVA.gas('bloquearPeriodoSaldo', { periodo: periodo })
+      .then(function (r) { state.msg = r.message; cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); redraw(); })
+      .finally(function () { state.saving = false; });
+  }
+
+  function guardar() {
+    if (!state.editando) return;
+    state.saving = true; redraw();
+    VEVA.gas('setSaldoInicial', state.editando)
+      .then(function (r) { if (r.status !== 'success') throw new Error(r.message); state.msg = 'Guardado'; state.editando = null; cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function desbloquear(cuenta, periodo) {
+    state.saving = true; redraw();
+    VEVA.gas('setSaldoInicial', { cuenta: cuenta, periodo: periodo, desbloquear: true })
+      .then(function () { state.msg = 'Desbloqueado'; cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function getPeriodos() {
+    var s = {}; state.rows.forEach(function (r) { s[r.periodo] = true; });
+    return Object.keys(s).sort().reverse();
+  }
+
+  function renderFilaAcciones(r) {
+    var editandoEsta = state.editando && state.editando.cuenta === r.cuenta && state.editando.periodo === r.periodo;
+    if (!r.bloqueado && editandoEsta) {
+      return VEVA.dom.el('div', { class: 'flex items-center gap-1' }, [
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 bg-[#635bff] text-white rounded text-[10px] font-medium', onClick: guardar, disabled: state.saving ? 'disabled' : null }, ['Guardar']),
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-[#e6ebf1] rounded text-[10px] text-[#697386]', onClick: function () { state.editando = null; redraw(); } }, ['Cancelar'])
+      ]);
+    }
+    var btns = [];
+    if (!r.bloqueado) btns.push(VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-[#e6ebf1] rounded text-[10px] text-[#697386] hover:border-[#635bff]', onClick: function () { state.editando = { cuenta: r.cuenta, periodo: r.periodo, saldo: r.saldo }; redraw(); } }, ['Editar']));
+    if (r.bloqueado) btns.push(VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-[#e6ebf1] rounded text-[10px] text-amber-600 hover:border-amber-400', onClick: function () { desbloquear(r.cuenta, r.periodo); } }, ['Desbloquear']));
+    return VEVA.dom.el('div', { class: 'flex items-center gap-1' }, btns);
+  }
+
+  function renderFila(r) {
+    var editandoEsta = state.editando && state.editando.cuenta === r.cuenta && state.editando.periodo === r.periodo;
+    var saldoCell;
+    if (editandoEsta) {
+      var input = VEVA.dom.el('input', { type: 'number', class: 'w-28 text-right border border-[#635bff] rounded px-1 py-0.5 text-[12px] outline-none' }, []);
+      input.value = state.editando.saldo;
+      input.addEventListener('input', function (e) { state.editando.saldo = parseFloat(e.target.value) || 0; });
+      saldoCell = input;
+    } else {
+      saldoCell = r.saldo.toLocaleString('es-MX', { maximumFractionDigits: 2 });
+    }
+    return VEVA.dom.el('tr', { class: 'hover:bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [r.sociedad]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-[#697386]' }, [r.banco]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] font-mono text-[11px]' }, [r.cuenta]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [r.periodo]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-right font-medium' }, [saldoCell]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [VEVA.dom.el('span', { class: 'inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold ' + (r.bloqueado ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700') }, [r.bloqueado ? 'Bloqueado' : 'Editable'])]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [renderFilaAcciones(r)])
+    ]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('admintab-saldos-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var periodos = getPeriodos();
+    var selPer = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 outline-none focus:border-[#635bff]' },
+      [VEVA.dom.el('option', { value: '' }, ['Todos los periodos'])].concat(periodos.map(function (p) { return VEVA.dom.el('option', { value: p }, [p]); })));
+    selPer.value = state.filtPer;
+    selPer.addEventListener('change', function (e) { state.filtPer = e.target.value; cargar(); });
+
+    var toolbar = [selPer, VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium flex items-center gap-1.5', onClick: cargar }, [VEVA.icon('refresh-cw', 12), 'Actualizar'])];
+    if (state.filtPer) toolbar.push(VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[12px] font-medium', onClick: function () { bloquear(state.filtPer); }, disabled: state.saving ? 'disabled' : null }, ['Bloquear periodo ' + state.filtPer]));
+    if (state.msg) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-emerald-600 font-medium' }, [state.msg]));
+    if (state.error) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-red-500' }, [state.error]));
+    if (state.loading) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Cargando...']));
+
+    var thead = VEVA.dom.el('thead', { class: 'bg-[#f6f9fc] sticky top-0' }, [VEVA.dom.el('tr', {}, ['Sociedad', 'Banco', 'Cuenta', 'Periodo', 'Saldo Inicial', 'Estado', 'Acciones'].map(function (h) { return VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[11px] font-semibold text-[#697386] border-b border-[#e6ebf1]' }, [h]); }))]);
+    var bodyRows = state.rows.length ? state.rows.map(renderFila) : (!state.loading ? [VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: '7', class: 'px-3 py-6 text-center text-[#697386] italic' }, ['Sin datos'])])] : []);
+    var table = VEVA.dom.el('table', { class: 'w-full text-[12px] border-collapse' }, [thead, VEVA.dom.el('tbody', {}, bodyRows)]);
+
+    root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-5 space-y-4' }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-3 flex-wrap' }, toolbar),
+      VEVA.dom.el('div', { class: 'overflow-auto max-h-[60vh]' }, [table])
+    ]));
+  }
+
+  VEVA.adminTabs = VEVA.adminTabs || {};
+  VEVA.adminTabs.saldos = {
+    render: function (mount) { mount.appendChild(VEVA.dom.el('div', { id: 'admintab-saldos-root' }, [])); cargar(); },
+    destroy: function () {}
+  };
+})();
+</script>

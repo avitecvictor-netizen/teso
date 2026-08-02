@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VEVA Enterprise</title>
+
+  <!--
+    Cumple 02.5: HTML5 + CSS (Tailwind estatico compilado) + JavaScript nativo.
+    Nada de React, JSX, Babel, Recharts, Webpack ni Vite, ni CDN runtime de CSS.
+    El CSS se genera localmente en VS Code (ver PROMPT_MIGRACION_VEVA seccion 3)
+    y se sirve embebido via Styles.html - Apps Script no sirve .css sueltos.
+  -->
+  <?!= include('Styles'); ?>
+
+  <!--
+    Unica libreria externa del proyecto (decidida con el usuario en la
+    migracion de "carga-mov"): SheetJS, para parsear .xlsx/.xls en el
+    navegador (no hay forma nativa de leer ese binario). Version fijada
+    a 0.18.5 -- verificar que siga siendo la ultima estable antes de
+    produccion (https://www.npmjs.com/package/xlsx).
+  -->
+  <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-[#f6f9fc] text-[#0a2540]" style="font-family: -apple-system, Segoe UI, Roboto, sans-serif;">
+  <header class="h-16 bg-white border-b border-[#e6ebf1] px-6 flex items-center justify-between">
+    <div class="flex items-center gap-4">
+      <button id="veva-menu-toggle" class="p-2 hover:bg-[#f6f9fc] rounded-lg text-[#697386]"></button>
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 bg-[#635bff] rounded-lg flex items-center justify-center text-white font-black text-lg">V</div>
+        <span class="font-bold text-lg tracking-tight hidden sm:block">VEVA Enterprise</span>
+      </div>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="text-right hidden sm:block">
+        <p class="text-[12px] font-bold leading-none" id="veva-user-name">Cargando…</p>
+        <p class="text-[10px] text-[#697386]" id="veva-user-role">&nbsp;</p>
+      </div>
+      <div class="w-10 h-10 bg-[#eef2f7] rounded-full border border-[#e6ebf1] flex items-center justify-center text-[#635bff]" id="veva-user-avatar"></div>
+    </div>
+  </header>
+
+  <div class="flex" style="min-height: calc(100vh - 64px);">
+    <aside id="veva-sidebar" class="w-64 bg-white border-r border-[#e6ebf1] py-6 overflow-y-auto transition-all duration-300">
+      <nav id="veva-sidebar-nav"></nav>
+    </aside>
+    <main id="veva-main" class="flex-1 p-6 sm:p-10 overflow-y-auto"></main>
+  </div>
+
+  <!--
+    Patron oficial de Apps Script para componer varias vistas en una sola
+    pagina servida por doGet() -> HtmlService.createTemplateFromFile('Index').evaluate()
+    Documentacion: https://developers.google.com/apps-script/guides/html/templates
+
+    Requiere agregar en backend/Codigo.gs (una sola vez, no existe hoy):
+
+      function include(filename) {
+        return HtmlService.createHtmlOutputFromFile(filename).getContent();
+      }
+
+    Los scriptlets de servidor (ver los "include" de arriba y abajo de este
+    comentario) solo se evaluan cuando este archivo se sirve via
+    createTemplateFromFile; no funcionan si se abre este .html directo en
+    el navegador fuera de Apps Script.
+
+    OJO al editar este comentario: HtmlService escanea el archivo completo
+    buscando apertura-de-signo-menor seguida de interrogacion (el inicio de
+    un scriptlet) en TODO el texto, incluso dentro de comentarios HTML como
+    este -- no reconoce que es documentacion. Escribir aqui ese patron
+    seguido despues de interrogacion-signo-mayor en algun punto posterior
+    del archivo (aunque sea solo para explicarlo) hace que intente evaluar
+    lo que haya en medio como codigo real y truene con un SyntaxError
+    reportado, confusamente, contra backend/Codigo.gs -- paso el
+    2026-07-25, no lo repitas.
+
+    Al pegar estos archivos en el editor de Apps Script, el nombre del
+    archivo va SIN extension .html (el tipo ya lo define el editor):
+    "Index", "Styles", "Shared_Core", "View_PosicionBancaria".
+  -->
+  <?!= include('Shared_Core'); ?>
+  <?!= include('View_PosicionBancaria'); ?>
+  <?!= include('View_Cobranza'); ?>
+  <?!= include('View_ReporteFechas'); ?>
+  <?!= include('View_CargaMovimientos'); ?>
+  <?!= include('View_Clasificador'); ?>
+  <?!= include('View_Conciliacion'); ?>
+  <?!= include('View_Validacion'); ?>
+  <?!= include('View_Solicitud'); ?>
+  <?!= include('View_FlujoEfectivo'); ?>
+  <?!= include('View_AdminRecalcSumEfe'); ?>
+  <?!= include('View_AdminRecalcMovs'); ?>
+  <?!= include('View_AdminSaldos'); ?>
+  <?!= include('View_AdminMapeo'); ?>
+  <?!= include('View_AdminCuentas'); ?>
+  <?!= include('View_AdminCadenaSaldos'); ?>
+  <?!= include('View_AdminFlujo'); ?>
+  <?!= include('View_ListaDist'); ?>
+  <?!= include('View_Pagos'); ?>
+  <?!= include('View_NotificacionesPagos'); ?>
+  <?!= include('View_HistoricoPagos'); ?>
+</body>
+</html>

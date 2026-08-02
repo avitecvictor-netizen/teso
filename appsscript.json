@@ -1,0 +1,15 @@
+{
+  "timeZone": "America/Mexico_City",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      { "userSymbol": "People", "version": "v1", "serviceId": "peopleapi" },
+      { "userSymbol": "Gmail", "version": "v1", "serviceId": "gmail" }
+    ]
+  },
+  "webapp": {
+    "access": "DOMAIN",
+    "executeAs": "USER_ACCESSING"
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8"
+}

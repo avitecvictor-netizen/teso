@@ -1,0 +1,241 @@
+<script>
+/**
+ * TESO - Vista: Historico de Pagos (Grupo 5, 2026-07-31).
+ * Responsabilidad unica: consultar todo lo REALMENTE pagado, por dia,
+ * filtrable por rango de fechas/sociedad/moneda/busqueda libre. Pura
+ * lectura -- no muta nada, no compite con el flujo de aprobacion de
+ * View_Pagos.html.
+ *
+ * Vista nueva y aparte (mismo criterio ya usado para
+ * View_NotificacionesPagos.html: una responsabilidad, un archivo, no una
+ * tab mas dentro de View_Pagos.html). Diseño mockup-first, iterado con
+ * el usuario antes de escribir este codigo (ver PROJECT_STATUS.md).
+ *
+ * Backend citado: getHistoricoPagos, getCatalogoCuentasPago (Svc_Pagos.js).
+ */
+(function () {
+  var state = {
+    loading: true, error: null,
+    filas: [], sociedades: [],
+    filtros: { fechaDesde: '', fechaHasta: '', sociedad: '', moneda: '', busqueda: '' }
+  };
+
+  function fmtMonto(n) { return '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function fmtTc(n) { return (n == null || isNaN(n)) ? '' : Number(n).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 4 }); }
+  // f.fecha ya llega como 'yyyy-MM-dd' en hora local Mexico (Utilities.formatDate
+  // en el backend, ver getHistoricoPagos) -- nunca parsear con `new Date(iso)`
+  // aqui, reventaria el mismo bug de UTC que ya se corrigio del lado del servidor.
+  function fmtFechaCorta(diaIso) { return diaIso ? diaIso.split('-').reverse().join('/') : ''; }
+
+  function cargar() {
+    state.loading = true; state.error = null; redraw();
+    Promise.all([VEVA.gas('getCatalogoCuentasPago'), buscar(true)])
+      .then(function (res) {
+        var resCat = res[0];
+        var soc = {};
+        ((resCat && resCat.status === 'success') ? resCat.data : []).forEach(function (c) { if (c.nombreCorto) soc[c.nombreCorto] = true; });
+        state.sociedades = Object.keys(soc).sort();
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  /** silencioso=true en la carga inicial (ya la envuelve cargar() con su
+   * propio loading/redraw) -- en los usos posteriores (boton "Aplicar
+   * filtros") maneja su propio ciclo de carga/error. */
+  function buscar(silencioso) {
+    var payload = {
+      fechaDesde: state.filtros.fechaDesde || '',
+      fechaHasta: state.filtros.fechaHasta || '',
+      sociedad: state.filtros.sociedad || '',
+      moneda: state.filtros.moneda || '',
+      busqueda: state.filtros.busqueda || ''
+    };
+    if (!silencioso) { state.loading = true; state.error = null; redraw(); }
+    var p = VEVA.gas('getHistoricoPagos', payload)
+      .then(function (res) {
+        if (!res || res.status !== 'success') throw new Error((res && res.message) || 'Error al cargar el histórico de pagos');
+        state.filas = res.data;
+      });
+    if (!silencioso) {
+      p.catch(function (e) { state.error = String(e.message || e); })
+        .finally(function () { state.loading = false; redraw(); });
+    }
+    return p;
+  }
+
+  // ---- Agrupar por dia (ya vienen ordenadas desc por fecha desde el backend) ----
+  function agruparPorDia(filas) {
+    var grupos = [], porDia = {};
+    filas.forEach(function (f) {
+      var dia = f.fecha ? String(f.fecha).slice(0, 10) : '(sin fecha)';
+      if (!porDia[dia]) { porDia[dia] = { dia: dia, filas: [] }; grupos.push(porDia[dia]); }
+      porDia[dia].filas.push(f);
+    });
+    return grupos;
+  }
+
+  /** Subtotal del dia -- Monto MXN es una suma real (una sola moneda);
+   * Monto M.E. no se suma entre monedas distintas (no tiene sentido sin
+   * convertir), se desglosa "USD $X · EUR $Y" igual que el resto de la
+   * app (ver totalesPorDivisa/resumenChipsTexto en View_Pagos.html). */
+  function subtotalDia(filas) {
+    var mapMe = {}, sumaMxn = 0, hayMxn = false;
+    filas.forEach(function (f) {
+      if (f.montoMonedaExtranjera != null) mapMe[f.moneda] = (mapMe[f.moneda] || 0) + f.montoMonedaExtranjera;
+      if (f.montoMxn != null) { sumaMxn += f.montoMxn; hayMxn = true; }
+    });
+    var textoMe = Object.keys(mapMe).sort().map(function (m) { return m + ' ' + fmtMonto(mapMe[m]); }).join(' · ');
+    return { textoMe: textoMe, textoMxn: hayMxn ? fmtMonto(sumaMxn) : '' };
+  }
+
+  // ---- Render ----
+  function renderFiltros() {
+    var f = state.filtros;
+    function campo(label, input) { return VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold uppercase tracking-wide text-[#8792a2]' }, [label]), input]); }
+
+    var inputDesde = VEVA.dom.el('input', { type: 'date', class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]' }, []);
+    inputDesde.value = f.fechaDesde;
+    inputDesde.addEventListener('change', function (e) { f.fechaDesde = e.target.value; });
+
+    var inputHasta = VEVA.dom.el('input', { type: 'date', class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]' }, []);
+    inputHasta.value = f.fechaHasta;
+    inputHasta.addEventListener('change', function (e) { f.fechaHasta = e.target.value; });
+
+    var selSociedad = VEVA.dom.el('select', { class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff] min-w-[130px]' },
+      [VEVA.dom.el('option', { value: '' }, ['Todas'])].concat(state.sociedades.map(function (s) { return VEVA.dom.el('option', { value: s }, [s]); })));
+    selSociedad.value = f.sociedad;
+    selSociedad.addEventListener('change', function (e) { f.sociedad = e.target.value; });
+
+    var selMoneda = VEVA.dom.el('select', { class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]' },
+      ['', 'MXN', 'USD', 'EUR', 'GBP'].map(function (m) { return VEVA.dom.el('option', { value: m }, [m || 'Todas']); }));
+    selMoneda.value = f.moneda;
+    selMoneda.addEventListener('change', function (e) { f.moneda = e.target.value; });
+
+    var inputBuscar = VEVA.dom.el('input', { type: 'text', 'data-focus-key': 'historico-buscar', class: 'w-full border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]', placeholder: 'Proveedor / folio / UUID / cuenta...' }, []);
+    inputBuscar.value = f.busqueda;
+    inputBuscar.addEventListener('input', function (e) { f.busqueda = e.target.value; });
+
+    var btnAplicar = VEVA.dom.el('button', { class: 'px-4 py-1.5 bg-[#635bff] text-white rounded text-[12px] font-bold disabled:opacity-50', disabled: state.loading ? 'disabled' : null, onClick: function () { buscar(false); } }, [state.loading ? 'Cargando...' : 'Aplicar filtros']);
+
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-3.5 flex flex-wrap items-end gap-3.5 mb-3.5' }, [
+      campo('Desde', inputDesde), campo('Hasta', inputHasta), campo('Sociedad', selSociedad), campo('Moneda', selMoneda),
+      VEVA.dom.el('div', { class: 'flex-1 min-w-[200px]' }, [campo('Buscar', inputBuscar)]),
+      btnAplicar
+    ]);
+  }
+
+  function renderResumen() {
+    var mapMe = {}, sumaMxn = 0, hayMxn = false;
+    state.filas.forEach(function (f) {
+      if (f.montoMonedaExtranjera != null) mapMe[f.moneda] = (mapMe[f.moneda] || 0) + f.montoMonedaExtranjera;
+      if (f.montoMxn != null) { sumaMxn += f.montoMxn; hayMxn = true; }
+    });
+    var chips = [VEVA.dom.el('span', { class: 'font-mono text-[12px] font-bold rounded-full px-3 py-1 border border-[#e6ebf1] bg-white' }, [state.filas.length + ' pago(s)'])];
+    if (hayMxn) chips.push(VEVA.dom.el('span', { class: 'font-mono text-[12px] font-bold rounded-full px-3 py-1 border border-[#635bff]/30 bg-[#635bff]/10 text-[#4c3fe0]' }, ['MXN ' + fmtMonto(sumaMxn)]));
+    Object.keys(mapMe).sort().forEach(function (m) {
+      chips.push(VEVA.dom.el('span', { class: 'font-mono text-[12px] font-bold rounded-full px-3 py-1 border border-[#635bff]/30 bg-[#635bff]/10 text-[#4c3fe0]' }, [m + ' ' + fmtMonto(mapMe[m])]));
+    });
+    return VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-2 mb-3.5' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold uppercase tracking-wide text-[#8792a2] mr-1' }, ['Total del rango'])].concat(chips));
+  }
+
+  function renderDiaSep(grupo) {
+    var sub = subtotalDia(grupo.filas);
+    return VEVA.dom.el('tr', {}, [
+      VEVA.dom.el('td', { colspan: '9', class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1] px-2.5 py-1.5 text-[11px] font-bold text-[#0a2540]' }, [grupo.dia === '(sin fecha)' ? grupo.dia : fmtFechaCorta(grupo.dia)]),
+      VEVA.dom.el('td', { class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1]' }, []),
+      VEVA.dom.el('td', { class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1]' }, []),
+      VEVA.dom.el('td', { class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1] px-2.5 py-1.5 text-[11px] font-bold text-right font-mono' }, [sub.textoMe]),
+      VEVA.dom.el('td', { class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1] px-2.5 py-1.5 text-[11px] font-bold text-right font-mono' }, [sub.textoMxn]),
+      VEVA.dom.el('td', { class: 'bg-[#f6f9fc] border-t border-b border-[#e6ebf1]' }, [])
+    ]);
+  }
+
+  function td(content, extraClass) { return VEVA.dom.el('td', { class: 'px-2.5 py-1 text-[11px] whitespace-nowrap ' + (extraClass || '') }, [content == null ? '' : String(content)]); }
+  function tdNum(content) { return VEVA.dom.el('td', { class: 'px-2.5 py-1 text-[11px] whitespace-nowrap text-right font-mono' }, [content == null || content === '' ? VEVA.dom.el('span', { class: 'text-[#c3c9d3]' }, ['—']) : content]); }
+
+  function renderFila(f) {
+    return VEVA.dom.el('tr', { class: 'border-b border-[#f0f2f6] hover:bg-[#fafbff]' }, [
+      td(fmtFechaCorta(f.fecha)),
+      td(VEVA.dom.el('span', { class: 'inline-block text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#f6f9fc] text-[#697386] border border-[#e6ebf1]' }, [f.sociedad || ''])),
+      td(f.folio, 'font-mono font-semibold'),
+      td(f.proveedor),
+      td(f.referencia),
+      td(f.uuid, 'font-mono text-[#697386]'),
+      td(f.cuentaCorta, 'font-mono text-[#697386]'),
+      td(f.banco),
+      td(f.moneda, 'font-mono font-bold text-[#697386]'),
+      tdNum(fmtTc(f.tcDelDia)),
+      tdNum(fmtTc(f.tcAplicado)),
+      tdNum(f.montoMonedaExtranjera != null ? fmtMonto(f.montoMonedaExtranjera).replace('$', '') : null),
+      tdNum(f.montoMxn != null ? fmtMonto(f.montoMxn).replace('$', '') : null),
+      td(f.solicitante)
+    ]);
+  }
+
+  function renderTabla() {
+    var grupos = agruparPorDia(state.filas);
+    var filas = [];
+    grupos.forEach(function (g) {
+      filas.push(renderDiaSep(g));
+      g.filas.forEach(function (f) { filas.push(renderFila(f)); });
+    });
+
+    var head = ['Fecha', 'Sociedad', 'Folio', 'Proveedor', 'Referencia', 'UUID', 'Cuenta', 'Banco', 'Mon.', 'TC del día', 'TC aplicado', 'Monto M.E.', 'Monto MXN', 'Solicitado por'];
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', {}, head.map(function (h, i) {
+      return VEVA.dom.el('th', { class: 'sticky top-0 bg-[#f6f9fc] border-b border-[#e6ebf1] px-2.5 py-1.5 text-[9.5px] font-bold uppercase tracking-wide text-[#8792a2] text-left whitespace-nowrap' + (i >= 9 && i <= 12 ? ' text-right' : '') }, [h]);
+    }))]);
+
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [VEVA.dom.el('table', { class: 'w-full border-collapse', style: 'min-width:1180px' }, [thead, VEVA.dom.el('tbody', {}, filas)])]),
+      VEVA.dom.el('div', { class: 'px-4 py-2.5 border-t border-[#e6ebf1] text-[11px] text-[#8792a2]' }, [state.filas.length + ' pago(s) en el rango filtrado, agrupados por día.'])
+    ]);
+  }
+
+  function _redrawInner() {
+    var root = document.getElementById('view-historicopagos-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Histórico de pagos']),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5 mb-4' }, ['Consulta todo lo aplicado por día — filtra por fecha, sociedad o moneda.'])
+    ]));
+    root.appendChild(renderFiltros());
+    if (state.error) root.appendChild(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-3 rounded-xl text-[12px] text-red-700 mb-3.5' }, [state.error]));
+    if (state.loading) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'), VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Cargando...'])]));
+      return;
+    }
+    root.appendChild(renderResumen());
+    root.appendChild(renderTabla());
+  }
+
+  // Mismo patron de preservar scroll/foco que View_Pagos.html -- evita
+  // que el buscador pierda el cursor en cada tecla y que la pagina salte
+  // al inicio tras aplicar filtros.
+  function redraw() {
+    var mainScroll = document.getElementById('veva-main');
+    var scrollTop = mainScroll ? mainScroll.scrollTop : 0;
+    var activo = document.activeElement;
+    var focusKey = null, selStart = null, selEnd = null;
+    if (activo && activo.hasAttribute && activo.hasAttribute('data-focus-key')) {
+      focusKey = activo.getAttribute('data-focus-key');
+      if (typeof activo.selectionStart === 'number') { selStart = activo.selectionStart; selEnd = activo.selectionEnd; }
+    }
+    _redrawInner();
+    if (focusKey) {
+      var el = document.querySelector('[data-focus-key="' + focusKey + '"]');
+      if (el) { el.focus(); if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selEnd); } catch (e) { } } }
+    }
+    if (mainScroll) mainScroll.scrollTop = scrollTop;
+  }
+
+  VEVA.registerView('historico-pagos', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-historicopagos-root', class: 'space-y-0' }, []));
+      cargar();
+    },
+    destroy: function () {}
+  });
+})();
+</script>

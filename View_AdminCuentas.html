@@ -1,0 +1,123 @@
+<script>
+/**
+ * VEVA - Tab admin: Cuentas del Grupo.
+ * Responsabilidad unica: CRUD de CAT_CUENTAS_MAPEO. Puerto directo de
+ * AdminCuentas (_source/Index.jsx:4618). Sub-vista de 'admin-flujo' -- se
+ * registra en VEVA.adminTabs.
+ *
+ * Backends citados: getCatCuentasAdmin, saveCatCuenta, deleteCatCuenta
+ * (Svc_Admin.gs). Campos verificados: cuenta, banco, idSociedad,
+ * nombreSociedad, moneda, tipoCuenta, tipoCuenta2, nombreCorto, abrCobranza.
+ */
+(function () {
+  var EMPTY_FORM = { cuenta: '', banco: '', idSociedad: '', nombreSociedad: '', moneda: 'MXN', tipoCuenta: 'OPERATIVA', tipoCuenta2: '', nombreCorto: '', abrCobranza: '' };
+  var CAMPOS = [
+    ['cuenta', 'Numero de Cuenta'], ['banco', 'Banco'], ['idSociedad', 'ID Sociedad'],
+    ['nombreSociedad', 'Nombre Sociedad'], ['moneda', 'Moneda'], ['tipoCuenta', 'Tipo Cuenta'],
+    ['tipoCuenta2', 'Tipo Cuenta 2'], ['nombreCorto', 'Nombre Corto'], ['abrCobranza', 'Abr. Cobranza']
+  ];
+  var state = { rows: [], loading: false, error: '', form: null, saving: false, msg: '', filtSoc: '' };
+
+  function cargar() {
+    state.loading = true; redraw();
+    VEVA.gas('getCatCuentasAdmin')
+      .then(function (r) { if (r.status === 'success') state.rows = r.data; else state.error = r.message; })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function guardar() {
+    if (!state.form || !state.form.cuenta) return;
+    state.saving = true; redraw();
+    VEVA.gas('saveCatCuenta', state.form)
+      .then(function (r) { if (r.status !== 'success') throw new Error(r.message); state.msg = 'Guardado'; state.form = null; cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function eliminar(cuenta) {
+    if (!confirm('Eliminar cuenta ' + cuenta + '?')) return;
+    state.saving = true; redraw();
+    VEVA.gas('deleteCatCuenta', { cuenta: cuenta })
+      .then(function () { cargar(); })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
+  }
+
+  function getSociedades() {
+    var s = {}; state.rows.forEach(function (r) { if (r.idSociedad) s[r.idSociedad] = true; });
+    return Object.keys(s).sort();
+  }
+
+  function renderForm() {
+    if (!state.form) return null;
+    var campos = CAMPOS.map(function (c) {
+      var key = c[0], label = c[1];
+      var input = VEVA.dom.el('input', { type: 'text', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]' }, []);
+      input.value = state.form[key] || '';
+      input.addEventListener('input', function (e) { state.form[key] = e.target.value; });
+      return VEVA.dom.el('div', { class: 'space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] text-[#697386] font-semibold uppercase' }, [label]), input]);
+    });
+    return VEVA.dom.el('div', { class: 'border border-[#635bff] rounded-xl p-4 bg-[#f5f7ff] grid grid-cols-2 gap-3 sm:grid-cols-3' }, campos.concat([
+      VEVA.dom.el('div', { class: 'col-span-full flex gap-2 pt-1' }, [
+        VEVA.dom.el('button', { class: 'px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium', onClick: guardar, disabled: state.saving ? 'disabled' : null }, ['Guardar']),
+        VEVA.dom.el('button', { class: 'px-4 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] text-[#697386]', onClick: function () { state.form = null; redraw(); } }, ['Cancelar'])
+      ])
+    ]));
+  }
+
+  function renderFila(r) {
+    return VEVA.dom.el('tr', { class: 'hover:bg-[#f6f9fc]' }, [
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] font-mono text-[11px]' }, [r.cuenta]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [r.banco]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [r.idSociedad]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] font-medium' }, [r.nombreCorto]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-center' }, [r.moneda]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0] text-[#697386]' }, [r.tipoCuenta]),
+      VEVA.dom.el('td', { class: 'px-3 py-1.5 border-b border-[#f0f0f0]' }, [VEVA.dom.el('div', { class: 'flex gap-1' }, [
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-[#e6ebf1] rounded text-[10px] text-[#697386] hover:border-[#635bff]', onClick: function () { state.form = Object.assign({}, r); redraw(); } }, ['Editar']),
+        VEVA.dom.el('button', { class: 'px-2 py-0.5 border border-red-200 rounded text-[10px] text-red-400 hover:border-red-400', onClick: function () { eliminar(r.cuenta); } }, ['Eliminar'])
+      ])])
+    ]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('admintab-cuentas-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var sociedades = getSociedades();
+    var filtered = state.filtSoc ? state.rows.filter(function (r) { return r.idSociedad === state.filtSoc; }) : state.rows;
+
+    var selSoc = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-[#635bff]' },
+      [VEVA.dom.el('option', { value: '' }, ['Todas las sociedades'])].concat(sociedades.map(function (s) { return VEVA.dom.el('option', { value: s }, [s]); })));
+    selSoc.value = state.filtSoc;
+    selSoc.addEventListener('change', function (e) { state.filtSoc = e.target.value; redraw(); });
+
+    var toolbar = [
+      VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-medium flex items-center gap-1.5', onClick: function () { state.form = Object.assign({}, EMPTY_FORM); redraw(); } }, [VEVA.icon('plus', 12), 'Nueva cuenta']),
+      selSoc
+    ];
+    if (state.loading) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Cargando...']));
+    if (state.msg) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-emerald-600' }, [state.msg]));
+    if (state.error) toolbar.push(VEVA.dom.el('span', { class: 'text-[11px] text-red-500' }, [state.error]));
+
+    var thead = VEVA.dom.el('thead', { class: 'bg-[#f6f9fc] sticky top-0' }, [VEVA.dom.el('tr', {}, ['Cuenta', 'Banco', 'Sociedad', 'Nombre Corto', 'Moneda', 'Tipo', ''].map(function (h) { return VEVA.dom.el('th', { class: 'px-3 py-2 text-left text-[11px] font-semibold text-[#697386] border-b border-[#e6ebf1]' }, [h]); }))]);
+    var bodyRows = filtered.map(renderFila);
+    if (!filtered.length && !state.loading) bodyRows.push(VEVA.dom.el('tr', {}, [VEVA.dom.el('td', { colspan: '7', class: 'px-3 py-6 text-center text-[#697386] italic' }, ['Sin cuentas'])]));
+    var table = VEVA.dom.el('table', { class: 'w-full text-[12px] border-collapse' }, [thead, VEVA.dom.el('tbody', {}, bodyRows)]);
+
+    var children = [VEVA.dom.el('div', { class: 'flex items-center gap-3 flex-wrap' }, toolbar)];
+    var form = renderForm(); if (form) children.push(form);
+    children.push(VEVA.dom.el('div', { class: 'overflow-auto max-h-[60vh]' }, [table]));
+
+    root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-5 space-y-4' }, children));
+  }
+
+  VEVA.adminTabs = VEVA.adminTabs || {};
+  VEVA.adminTabs.cuentas = {
+    render: function (mount) { mount.appendChild(VEVA.dom.el('div', { id: 'admintab-cuentas-root' }, [])); cargar(); },
+    destroy: function () {}
+  };
+})();
+</script>

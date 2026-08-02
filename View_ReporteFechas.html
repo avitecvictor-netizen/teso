@@ -1,0 +1,294 @@
+<script>
+/**
+ * VEVA - Vista: Reporte por Fechas (pivot sociedades x dias).
+ * Responsabilidad unica: consultar getHistorialPosicion (backend/Codigo.gs:628,
+ * sin modificar) y pintar la tabla pivote con drill-down por sociedad.
+ * Puerto directo del componente React ReporteHistorico (_source/Index.jsx:2087).
+ *
+ * Contrato de datos verificado contra backend/Codigo.gs::getHistorialPosicion:
+ *   { status: 'success'|'error', message: string,
+ *     data: [{ fecha, sociedad, banco, cuenta, saldo, moneda, tc, saldoMxn,
+ *              tipo, tipo2, abrCobranza }] }
+ *
+ * Diferencia intencional vs el React original: el boton "Exportar" genera un
+ * CSV nativo (Blob + <a download>) en vez de un .xlsx real via SheetJS
+ * (libreria externa por CDN que el prototipo cargaba). Se evita sumar una
+ * dependencia runtime nueva; el CSV abre igual en Excel.
+ */
+(function () {
+  var state = {
+    periodo: 'sem-actual', desde: '', hasta: '',
+    registros: [], loading: false, error: null, expanded: {}
+  };
+
+  var PERIODOS = [
+    { id: 'sem-actual',   label: 'Sem. actual' },
+    { id: 'sem-anterior', label: 'Sem. anterior' },
+    { id: 'mes-actual',   label: 'Mes actual' },
+    { id: 'custom',       label: 'Personalizado' }
+  ];
+
+  function getRange(p, d, h) {
+    var today = new Date();
+    var iso = function (dt) { return dt.toISOString().split('T')[0]; };
+    if (p === 'sem-actual') {
+      var day = today.getDay();
+      var mon = new Date(today); mon.setDate(today.getDate() - (day === 0 ? 6 : day - 1));
+      return { desde: iso(mon), hasta: iso(today) };
+    }
+    if (p === 'sem-anterior') {
+      var day2 = today.getDay();
+      var mon2 = new Date(today); mon2.setDate(today.getDate() - (day2 === 0 ? 6 : day2 - 1) - 7);
+      var sun2 = new Date(mon2); sun2.setDate(mon2.getDate() + 6);
+      return { desde: iso(mon2), hasta: iso(sun2) };
+    }
+    if (p === 'mes-actual') {
+      return { desde: iso(new Date(today.getFullYear(), today.getMonth(), 1)), hasta: iso(today) };
+    }
+    return { desde: d, hasta: h };
+  }
+
+  function cargar(p, d, h) {
+    state.loading = true; state.error = null; redraw();
+    var rango = getRange(p, d, h);
+    VEVA.gas('getHistorialPosicion', rango)
+      .then(function (res) {
+        if (res.status !== 'success') throw new Error(res.message || 'Error al consultar historial');
+        state.registros = res.data || [];
+        state.expanded = {};
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  function normTipo(t) {
+    var s = String(t || '').trim().toUpperCase();
+    if (s === 'JV') return 'JV';
+    if (s.indexOf('NO OPERAT') >= 0) return 'No Operativas';
+    if (s.indexOf('RESTRI') >= 0) return 'Restringidas';
+    if (s.indexOf('OPERAT') >= 0) return 'Operativas';
+    return 'Otras';
+  }
+
+  function computePivot() {
+    var data = state.registros;
+    if (!data.length) return { fechas: [], tipoGroups: [], total: {} };
+    var fechas = data.map(function (r) { return r.fecha; }).filter(function (v, i, a) { return a.indexOf(v) === i; }).sort();
+
+    var socMap = {}, socOrder = [];
+    data.forEach(function (r) {
+      var tp = normTipo(r.tipo);
+      var socKey = r.sociedad + '||' + tp;
+      if (!socMap[socKey]) { socMap[socKey] = { nombre: r.sociedad, tipo: tp, totales: {}, cuentas: {}, cuentaOrder: [] }; socOrder.push(socKey); }
+      var soc = socMap[socKey];
+      soc.totales[r.fecha] = (soc.totales[r.fecha] || 0) + r.saldoMxn;
+      var ck = (r.banco || '') + ' *' + String(r.cuenta).slice(-4);
+      if (!soc.cuentas[ck]) { soc.cuentas[ck] = {}; soc.cuentaOrder.push(ck); }
+      soc.cuentas[ck][r.fecha] = (soc.cuentas[ck][r.fecha] || 0) + r.saldoMxn;
+    });
+
+    var total = {};
+    fechas.forEach(function (f) {
+      total[f] = socOrder.reduce(function (a, k) { return a + (socMap[k].totales[f] || 0); }, 0);
+    });
+
+    var tMap = {};
+    socOrder.forEach(function (socKey) {
+      var s = socMap[socKey], t = s.tipo;
+      if (!tMap[t]) tMap[t] = { totales: {}, rows: [] };
+      tMap[t].rows.push({
+        nombre: s.nombre, totales: s.totales,
+        cuentas: s.cuentaOrder.map(function (c) { return { cuenta: c, vals: s.cuentas[c] }; })
+      });
+      fechas.forEach(function (f) { tMap[t].totales[f] = (tMap[t].totales[f] || 0) + (s.totales[f] || 0); });
+    });
+
+    var tipoGroups = ['Operativas', 'JV', 'No Operativas', 'Restringidas', 'Otras'].filter(function (t) { return tMap[t]; }).map(function (t) {
+      tMap[t].rows.sort(function (a, b) {
+        var sa = Object.keys(a.totales).reduce(function (x, k) { return x + a.totales[k]; }, 0);
+        var sb = Object.keys(b.totales).reduce(function (x, k) { return x + b.totales[k]; }, 0);
+        return sb - sa;
+      });
+      return { tipo: t, totales: tMap[t].totales, rows: tMap[t].rows };
+    });
+
+    return { fechas: fechas, tipoGroups: tipoGroups, total: total };
+  }
+
+  function toggleRow(nombre) { state.expanded[nombre] = !state.expanded[nombre]; redraw(); }
+  function fmtCol(f) { return f ? f.slice(5).replace('-', '/') : ''; }
+
+  function exportarCsv(pivot) {
+    if (!pivot.tipoGroups.length) return;
+    var rows = [['Tipo / Sociedad / Cuenta'].concat(pivot.fechas)];
+    pivot.tipoGroups.forEach(function (group) {
+      rows.push([group.tipo.toUpperCase()].concat(pivot.fechas.map(function (f) { return group.totales[f] || 0; })));
+      group.rows.forEach(function (row) {
+        rows.push(['  ' + row.nombre].concat(pivot.fechas.map(function (f) { return row.totales[f] || 0; })));
+        row.cuentas.forEach(function (c) {
+          rows.push(['    ' + c.cuenta].concat(pivot.fechas.map(function (f) { return c.vals[f] || 0; })));
+        });
+      });
+    });
+    rows.push(['TOTAL'].concat(pivot.fechas.map(function (f) { return pivot.total[f] || 0; })));
+    var csv = rows.map(function (r) { return r.map(function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; }).join(','); }).join('\n');
+    var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'VEVA_Reporte_Fechas.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function renderFiltros() {
+    var btns = PERIODOS.map(function (p) {
+      var active = state.periodo === p.id;
+      return VEVA.dom.el('button', {
+        class: 'px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all ' + (active ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386] hover:bg-[#e6ebf1]'),
+        onClick: function () { state.periodo = p.id; if (p.id !== 'custom') cargar(p.id); else redraw(); }
+      }, [p.label]);
+    });
+    var items = [VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-3' }, btns.concat(renderCustomRange()))];
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4' }, items);
+  }
+
+  function renderCustomRange() {
+    if (state.periodo !== 'custom') return [];
+    var inDesde = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 outline-none' }, []);
+    inDesde.value = state.desde;
+    inDesde.addEventListener('change', function (e) { state.desde = e.target.value; });
+    var inHasta = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-1.5 outline-none' }, []);
+    inHasta.value = state.hasta;
+    inHasta.addEventListener('change', function (e) { state.hasta = e.target.value; });
+    return [
+      inDesde,
+      VEVA.dom.el('span', { class: 'text-[12px] text-[#697386]' }, ['a']),
+      inHasta,
+      VEVA.dom.el('button', {
+        class: 'px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all',
+        onClick: function () { cargar('custom', state.desde, state.hasta); }
+      }, ['Consultar'])
+    ];
+  }
+
+  function renderCuentaRow(c) {
+    var tds = [VEVA.dom.el('td', { class: 'px-4 py-0.5 sticky left-0 bg-[#fafbff] z-10' }, [
+      VEVA.dom.el('span', { class: 'text-[10px] text-[#697386] font-mono pl-8' }, [c.cuenta])
+    ])];
+    return VEVA.dom.el('tr', { class: 'border-b border-[#f6f9fc]' }, tds);
+  }
+
+  function renderSociedadRow(row, fechas) {
+    var isOpen = !!state.expanded[row.nombre];
+    var head = VEVA.dom.el('tr', { class: 'border-b border-[#f0f2f8] cursor-pointer hover:bg-[#fafbff] transition-colors', onClick: function () { toggleRow(row.nombre); } }, [
+      VEVA.dom.el('td', { class: 'px-4 py-1 sticky left-0 bg-white z-10' }, [
+        VEVA.dom.el('div', { class: 'flex items-center gap-1.5 pl-3' }, [
+          VEVA.icon(isOpen ? 'chevron-down' : 'chevron-right', 11, 'text-[#697386] flex-shrink-0'),
+          VEVA.dom.el('span', { class: 'font-semibold text-[11px] text-[#0a2540]' }, [row.nombre]),
+          VEVA.dom.el('span', { class: 'text-[9px] text-[#b0b8c8]' }, [row.cuentas.length + 'c'])
+        ])
+      ])
+    ].concat(fechas.map(function (f) {
+      var v = row.totales[f];
+      return VEVA.dom.el('td', { class: 'px-3 py-1 text-right font-mono font-semibold text-[11px] text-[#0a2540]' }, [v ? VEVA.fmt.mxn(v) : '—']);
+    })));
+    var out = [head];
+    if (isOpen) row.cuentas.forEach(function (c) {
+      var tr = renderCuentaRow(c);
+      fechas.forEach(function (f) {
+        var v = c.vals[f];
+        tr.appendChild(VEVA.dom.el('td', { class: 'px-3 py-0.5 text-right font-mono text-[10px] text-[#697386]' }, [v ? VEVA.fmt.mxn(v) : '—']));
+      });
+      out.push(tr);
+    });
+    return out;
+  }
+
+  function renderTipoGroupRow(group, fechas) {
+    return VEVA.dom.el('tr', { class: 'border-b border-[#e2e5ef]' }, [
+      VEVA.dom.el('td', { class: 'px-4 py-1.5 sticky left-0 bg-[#f0f2f8] z-10' }, [
+        VEVA.dom.el('span', { class: 'text-[10px] font-bold text-[#0a2540] uppercase tracking-wider' }, [group.tipo])
+      ])
+    ].concat(fechas.map(function (f) {
+      var v = group.totales[f];
+      return VEVA.dom.el('td', { class: 'px-3 py-1.5 text-right font-mono font-bold text-[11px] text-[#0a2540] bg-[#f0f2f8]' }, [v ? VEVA.fmt.mxn(v) : '—']);
+    })));
+  }
+
+  function renderTabla(pivot) {
+    var theadRow = [VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider sticky left-0 bg-[#f6f9fc] min-w-[200px] z-10' }, ['Concepto'])]
+      .concat(pivot.fechas.map(function (f) { return VEVA.dom.el('th', { class: 'px-3 py-2 text-right text-[10px] font-bold text-[#697386] uppercase tracking-wider min-w-[110px] whitespace-nowrap' }, [fmtCol(f)]); }));
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1] bg-[#f6f9fc]' }, theadRow)]);
+
+    var rows = [];
+    pivot.tipoGroups.forEach(function (group) {
+      rows.push(renderTipoGroupRow(group, pivot.fechas));
+      group.rows.forEach(function (row) { rows = rows.concat(renderSociedadRow(row, pivot.fechas)); });
+    });
+    var totalRow = [VEVA.dom.el('td', { class: 'px-4 py-2 sticky left-0 bg-[#f6f9fc] z-10' }, [
+      VEVA.dom.el('span', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Total'])
+    ])].concat(pivot.fechas.map(function (f) {
+      return VEVA.dom.el('td', { class: 'px-3 py-2 text-right font-mono font-bold text-[12px] text-[#635bff]' }, [VEVA.fmt.mxn(pivot.total[f] || 0)]);
+    }));
+    rows.push(VEVA.dom.el('tr', { class: 'border-t-2 border-[#e6ebf1] bg-[#f6f9fc]' }, totalRow));
+
+    var table = VEVA.dom.el('table', { class: 'w-full text-[11px] border-collapse' }, [thead, VEVA.dom.el('tbody', {}, rows)]);
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [table])
+    ]);
+  }
+
+  function redraw() {
+    var root = document.getElementById('view-reportefechas-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var pivot = computePivot();
+
+    root.appendChild(VEVA.dom.el('div', { class: 'flex items-center justify-between' }, [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Reporte por Fechas']),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Saldos por sociedad y cuenta — dias como columnas'])
+      ]),
+      VEVA.dom.el('button', {
+        class: 'flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white rounded-lg text-[13px] font-bold hover:bg-emerald-600 transition-all' + (!pivot.tipoGroups.length ? ' opacity-40 pointer-events-none' : ''),
+        onClick: function () { exportarCsv(pivot); }
+      }, [VEVA.icon('download', 14), 'Exportar CSV'])
+    ]));
+
+    root.appendChild(renderFiltros());
+
+    if (state.loading) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [
+        VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'),
+        VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Consultando historial...'])
+      ]));
+      return;
+    }
+    if (state.error) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3' }, [
+        VEVA.icon('alert-circle', 16, 'text-red-500 flex-shrink-0'),
+        VEVA.dom.el('p', { class: 'text-[13px] text-red-700' }, [state.error])
+      ]));
+      return;
+    }
+    if (!pivot.tipoGroups.length) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center space-y-3' }, [
+        VEVA.icon('calendar-x', 32, 'text-[#e6ebf1] mx-auto'),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386]' }, ['Sin registros en el periodo seleccionado.'])
+      ]));
+      return;
+    }
+    root.appendChild(renderTabla(pivot));
+  }
+
+  VEVA.registerView('reporte-fechas', {
+    render: function (mount) {
+      var wrap = VEVA.dom.el('div', { id: 'view-reportefechas-root', class: 'space-y-6' }, []);
+      mount.appendChild(wrap);
+      cargar(state.periodo);
+    },
+    destroy: function () { /* sin listeners globales que limpiar en esta vista */ }
+  });
+})();
+</script>

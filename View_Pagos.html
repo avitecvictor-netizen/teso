@@ -1,0 +1,2036 @@
+<script>
+/**
+ * VEVA/TESO - Vista: Propuestas de Pago (workflow de aprobacion).
+ * Puerto de comportamiento (no de codigo) del prototipo standalone en
+ * _source/workflow_pagos/ -- ver PROMPT_MIGRACION_VEVA seccion 5-bis y
+ * PROMPT_TESORERIA360_PAGOS_1 para la interpretacion completa.
+ *
+ * Backend citado: TESO_src/backend/Svc_Pagos.js (getUsuarioActual,
+ * getPropuestasPago, getTcActual, updatePartidaPago,
+ * bulkUpdatePartidasPago, setPartidasPagoChecked, solicitarReactivacion,
+ * previsualizarPropuestaPago, confirmarCargaPropuestaPago,
+ * bulkResolverBanca, bulkResolverAplicado).
+ *
+ * Bloque F (2026-07-28): "Banca" y "Aplicado" ya no usan pastilla-clic ni
+ * input+boton individual -- cada linea tiene 2 checkboxes efimeros
+ * (positivo/negativo, se auto-excluyen) y un solo boton de lote por fase
+ * (resolverBanca/resolverAplicado) resuelve todas las marcadas en una
+ * sola llamada, para que el correo de esa transicion salga en un solo
+ * mensaje con 2 secciones. Una linea sin ninguna marca se queda en
+ * standby: no avanza, no genera correo. PAGADO sigue siendo un estado
+ * DERIVADO del acumulado real en APLICACIONES_PAGO (Bloque B,
+ * 2026-07-27) -- el checkbox positivo de Aplicado conserva el input de
+ * monto parcial opcional junto a el (si se deja vacio, aplica el saldo
+ * pendiente completo).
+ *
+ * Carga de propuesta (2026-07-26): boton "Cargar propuesta" que lee el
+ * Excel real (formato "PROPUESTA CONSOLIDADA") con SheetJS en el
+ * navegador -- mismo patron de dos pasos que ya usa carga-mov
+ * (View_CargaMovimientos.html: leer -> previsualizar -> confirmar, nunca
+ * se escribe nada hasta que el usuario confirma el preview).
+ *
+ * Segunda ronda (Tesoreria 360): drill-down Sociedad -> Propuesta ->
+ * Proveedor. FASE y ESTADO viven por linea: FASE nunca se pisa al
+ * rechazar o caducar (se congela donde iba), ESTADO es lo unico que
+ * cambia. Rechazadas y caducadas se sacan del flujo de 5 fases a dos
+ * pestanas fijas aparte. Contadores cuentan PROVEEDORES distintos.
+ *
+ * Tercera ronda (2026-07-26, retroalimentacion en vivo tras la primera
+ * prueba end-to-end con datos reales):
+ * - Presentacion tipo Excel/SAP: por defecto cada linea es su propia
+ *   fila (aunque el proveedor se repita, como en el archivo original) --
+ *   SOLO cuando un proveedor tiene 2+ lineas dentro de la misma
+ *   propuesta se agrupa/compacta con expandir para ver el detalle.
+ *   Seleccion en 3 niveles: linea individual, proveedor completo
+ *   (checkbox en el grupo), o propuesta completa (checkbox "todas").
+ * - Nuevas columnas visibles: NUMERO_PROVEEDOR (codigo SAP, antes nunca
+ *   se capturaba) y REFERENCIA (antes se perdia si "Texto" venia lleno,
+ *   ver Svc_Pagos.js).
+ * - Bug real corregido: pestana "Revision contable" no tenia ningun
+ *   boton de accion -- las partidas importadas nacian ahi sin forma de
+ *   avanzar a Tesoreria. Se agrega "Liberar a Tesoreria" (rol Contador).
+ * - Bug real corregido: el buscador de proveedor perdia el foco en cada
+ *   tecla porque `redraw()` reconstruye TODO el DOM (patron sin virtual
+ *   DOM de todo TESO) -- unico input+redraw sincrono de las 15 vistas.
+ *   Fix local: `redraw()` ahora preserva foco/cursor/scroll via
+ *   `data-focus-key`, sin tocar Shared_Core.html compartido.
+ * - Auditoria real por fase: ULTIMA_ACCION_POR/FECHA (generico, se
+ *   pisaba en cada transicion) se retira; el backend ahora estampa un
+ *   par POR/FECHA especifico por fase (REVISADO/AUTORIZADO/LIBERADO/
+ *   SUBIDO/APLICADO) segun la forma del patch -- el frontend no necesita
+ *   cambios para esto, solo se beneficia de que ya no se pierde el dato.
+ * - Gran total con TC actual (`getTcActual`, reutiliza `_getTcForDate` de
+ *   Codigo.js) + resumen de seleccion fijo (sticky) para no depender de
+ *   scroll para saber cuanto se lleva seleccionado.
+ */
+(function () {
+  var PHASES = [
+    { id: 'contabilidad', label: 'Revision contable' },
+    { id: 'tesoreria', label: 'Autorizacion tesoreria' },
+    { id: 'liberacion2', label: 'Liberacion contable' },
+    { id: 'banca', label: 'Carga a banca' },
+    { id: 'aplicado', label: 'Pago aplicado' }
+  ];
+  var PHASE_ORDER = PHASES.map(function (p) { return p.id; });
+  var ESTADO_TABS = [
+    { id: 'rechazadas', label: 'Rechazadas', estado: 'rechazada' },
+    { id: 'caducadas', label: 'Caducadas', estado: 'caducada' }
+  ];
+
+  var state = {
+    propuestas: [], usuario: null, tcActual: 1, loading: true, error: null,
+    sinAcceso: false, sinAccesoMensaje: '',
+    // Grupo 2 (2026-07-31, retroalimentacion de diseno): flag global de
+    // "una accion en lote esta en curso" -- deshabilita/da feedback visual
+    // a los botones de bulkAction/resolverBanca/resolverAplicado mientras
+    // dura la peticion, para que no se vean "sin reaccion" al click.
+    accionEnProceso: false,
+    activeTab: 'tesoreria', selectedSociedad: null,
+    expandedSoc: {}, expandedProp: {}, expandedProv: {},
+    lineSearch: {},
+    cargaAbierta: false, cargaArchivoNombre: '', cargaSheets: null,
+    cargaProcesando: false, cargaPreview: null, cargaError: null,
+    cargaResultado: null, cargaExcluidos: {}, cargaDragging: false,
+    // Pieza 2 (2026-07-28): motivo obligatorio para forzar la carga de
+    // lineas con UUID ya existente (override auditable, ver cargaConfirmar).
+    cargaMotivoForzado: '',
+    // Conciliacion (fase 6) + Comprobantes (fase 7), 2026-07-26 -- ver
+    // PROMPT_TESORERIA360_PAGOS_1.md seccion 3.3.
+    catalogoCuentas: [],
+    conciliacionData: null, conciliacionLoading: false, conciliacionExpanded: {},
+    conciliacionMatchOpen: {}, conciliacionCandidatos: {}, conciliacionCandidatosLoading: {}, conciliacionSeleccion: {},
+    comprobantesData: null, comprobantesLoading: false, comprobantesSeleccion: {}, comprobantesPanelAbierto: null
+  };
+
+  function fmtMonto(n) { return '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  // Hallazgo del revisor: una moneda vacia NO debe caer silenciosamente en
+  // MXN -- una linea en USD mal capturada se sumaria como pesos sin aviso.
+  // Se marca distinto a proposito, nunca se asume.
+  function fmtMontoDivisa(n, moneda) { return moneda ? (moneda + ' ' + fmtMonto(n)) : ('⚠ SIN MONEDA ' + fmtMonto(n)); }
+  function uniq(arr) { return arr.filter(function (v, i) { return arr.indexOf(v) === i; }); }
+  function faseLabel(id) { var m = PHASES.filter(function (p) { return p.id === id; })[0]; return m ? m.label : id; }
+  function isEstadoTab(id) { return ESTADO_TABS.some(function (t) { return t.id === id; }); }
+  function estadoForTab(id) { var m = ESTADO_TABS.filter(function (t) { return t.id === id; })[0]; return m ? m.estado : null; }
+  function tabLabel(id) { var m = ESTADO_TABS.filter(function (t) { return t.id === id; })[0]; return m ? m.label : faseLabel(id); }
+
+  function statusStyle(label) {
+    if (['Autorizada', 'Liberada', 'Subida', 'Pagada'].indexOf(label) >= 0) return { bg: 'bg-emerald-100', text: 'text-emerald-700' };
+    if (label === 'Parcial') return { bg: 'bg-[#635bff]/10', text: 'text-[#635bff]' };
+    return { bg: 'bg-gray-100', text: 'text-gray-600' };
+  }
+
+  // ---- Permisos: catalogo real CAT_USUARIOS. Si esta vacio (nadie lo ha
+  // llenado todavia) se falla ABIERTO -- se muestra todo -- para no
+  // bloquear el primer despliegue. Si ya tiene filas y el usuario actual
+  // no esta en el, se falla CERRADO solo para ese usuario. La comparacion
+  // normaliza acentos/mayusculas (hallazgo de QA: "Tesoreria" tecleado
+  // sin acento en la hoja no debe romper el gateo de permisos). ----
+  var SIN_ACENTOS = new RegExp(String.fromCharCode(91) + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + String.fromCharCode(93), 'g');
+  function normalizarRol(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(SIN_ACENTOS, ''); }
+  // Hallazgo real 2026-07-26: una persona puede tener MAS DE UNA fila en
+  // CAT_USUARIOS con el mismo email, una por rol (ej. alguien que es
+  // Tesoreria Y Director a la vez -- caso real confirmado con el
+  // usuario). getUsuarioActual (Svc_Pagos.js) ahora devuelve `roles`
+  // (array), no `rol` (singular) -- se revisa si el rol pedido esta
+  // presente en CUALQUIERA de los roles activos del usuario, no se
+  // compara contra "el" rol como si solo pudiera tener uno.
+  function puedeActuar(rolRequerido) {
+    if (!state.usuario) return false;
+    if (state.usuario.catalogoVacio) return true;
+    var roles = state.usuario.roles || [];
+    return roles.some(function (r) { return normalizarRol(r) === normalizarRol(rolRequerido); });
+  }
+  function esTesoreria() { return puedeActuar('Tesorería'); }
+  // Matriz de permisos del usuario: "Cargar Excel / crear propuesta" es
+  // Solicitante o Contador, nunca Tesoreria -- mismo gateo que el resto
+  // de botones de accion.
+  function puedeCargar() { return puedeActuar('Solicitante') || puedeActuar('Contador'); }
+  /** Conciliar partidas y subir/vincular comprobantes: Tesorería Y
+   * Contador (decidido con el usuario 2026-07-26, distinto del resto del
+   * modulo que suele ser un solo rol por accion). Mismo criterio en el
+   * backend (_puedeConciliarOComprobantes, Svc_Pagos.js) -- aqui es solo
+   * gateo de UI, igual que el resto de botones de accion de este archivo. */
+  function puedeConciliarComprobantes() { return esTesoreria() || puedeActuar('Contador'); }
+
+  function cargar() {
+    state.loading = true; state.error = null; redraw();
+    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getPropuestasPago'), VEVA.gas('getTcActual'), VEVA.gas('getCatalogoCuentasPago')])
+      .then(function (res) {
+        var resUsuario = res[0], resProp = res[1], resTc = res[2], resCat = res[3];
+        if (resUsuario == null) throw new Error('getUsuarioActual devolvio una respuesta vacia (null).');
+        if (resProp == null) throw new Error('getPropuestasPago devolvio una respuesta vacia (null).');
+        if (resUsuario.status !== 'success') throw new Error(resUsuario.message || 'Error al cargar usuario');
+        // Bloque 2 (2026-07-26): getPropuestasPago devuelve status
+        // 'sin_acceso' (no 'error') cuando el usuario no esta registrado
+        // con rol activo en CAT_USUARIOS -- se distingue de un error de
+        // red/servidor a proposito, para mostrar una pantalla de acceso
+        // denegado en vez del banner rojo generico de error.
+        if (resProp.status === 'sin_acceso') { state.sinAcceso = true; state.sinAccesoMensaje = resProp.message; return; }
+        if (resProp.status !== 'success') throw new Error(resProp.message || 'Error al cargar propuestas');
+        // Hallazgo real del revisor: sin este reset, una vez que
+        // state.sinAcceso queda en true, el boton "Reintentar" nunca
+        // vuelve a mostrar el tablero aunque el backend ya responda
+        // exito (ej. finanzas dio de alta al usuario) -- _redrawInner()
+        // sigue viendo sinAcceso=true y corta antes de renderizar nada.
+        state.sinAcceso = false; state.sinAccesoMensaje = '';
+        state.usuario = resUsuario.data;
+        state.propuestas = resProp.data;
+        state.tcActual = (resTc && resTc.status === 'success' && resTc.data.tc) ? resTc.data.tc : 1;
+        state.catalogoCuentas = (resCat && resCat.status === 'success') ? resCat.data : [];
+        // Hallazgo real de auditoria (2026-07-28): estas 2 respuestas se
+        // descartaban en silencio -- si getTcActual fallaba, el USD se
+        // sumaba 1:1 contra MXN en todos los "gran total" sin ningun
+        // aviso; si getCatalogoCuentasPago fallaba, el select de cuenta
+        // en la pestana Aplicado quedaba vacio (y la cuenta es
+        // obligatoria antes de pagar) sin que el usuario supiera por que.
+        // No bloquean el tablero (mismo patron que state.error en el
+        // resto del archivo, banner no-bloqueante), solo avisan.
+        var avisos = [];
+        if (resTc && resTc.status !== 'success') avisos.push('Tipo de cambio: ' + (resTc.message || 'no se pudo obtener, se usa TC 1.00 (los totales en USD quedarían mal convertidos).'));
+        if (resCat && resCat.status !== 'success') avisos.push('Catálogo de cuentas de pago: ' + (resCat.message || 'no se pudo cargar (no podrás seleccionar cuenta en la pestaña Aplicado).'));
+        if (avisos.length) state.error = avisos.join(' · ');
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.loading = false; redraw(); });
+  }
+
+  /** Refresco liviano tras una mutacion de partidas -- a diferencia de
+   * cargar(), NUNCA toca state.loading, asi que _redrawInner jamas
+   * colapsa la tabla completa a un spinner mientras esta en vuelo. Ese
+   * colapso era la causa raiz real del salto de scroll al inicio de la
+   * pagina reportado por el usuario: redraw() intenta preservar
+   * scrollTop, pero cuando _redrawInner sustituye toda la tabla por una
+   * caja de spinner mucho mas corta, el navegador clampa el scroll a una
+   * posicion mucho menor -- y la SIGUIENTE llamada a redraw() (cuando
+   * cargar() termina) captura ESE scrollTop ya corrompido como si fuera
+   * el "original" a restaurar. Al no colapsar nunca la tabla, el scroll
+   * real del usuario nunca se pierde. Tambien es mas rapido que cargar()
+   * completo: solo relee getPropuestasPago, no usuario/TC/catalogo de
+   * cuentas (que no cambian por una mutacion de partidas).
+   *
+   * Hallazgo real del revisor: a diferencia de cargar() (que SI limpia
+   * state.error al inicio), esta funcion NUNCA lo toca salvo en su propio
+   * catch -- la mayoria de los llamadores fijan state.error con el
+   * motivo real del rechazo de LA MUTACION justo antes de llamar aqui
+   * (ej. "monto autorizado invalido"), y limpiarlo aqui lo hubiera
+   * enmascarado antes de que el usuario llegara a verlo en un flujo de
+   * dinero real. 3 patrones de llamado distintos, cada uno responsable de
+   * su propio state.error: (a) la mayoria solo llama aqui en su rama de
+   * FALLO (no tocan error en exito, nunca lo tocaron); (b) resolverBanca/
+   * resolverAplicado llaman aqui SIEMPRE (exito o fallo) y fijan/limpian
+   * state.error ellos mismos en su propio .then(); (c) solicitarReactivacion
+   * solo llama aqui en su rama de EXITO, y limpia state.error=null antes
+   * de llamar, para no dejar pegado un error de una accion anterior. */
+  function recargarPropuestas() {
+    VEVA.gas('getPropuestasPago')
+      .then(function (res) {
+        if (res == null) throw new Error('getPropuestasPago devolvio una respuesta vacia (null).');
+        if (res.status === 'sin_acceso') { state.sinAcceso = true; state.sinAccesoMensaje = res.message; return; }
+        if (res.status !== 'success') throw new Error(res.message || 'Error al recargar propuestas');
+        state.sinAcceso = false; state.sinAccesoMensaje = '';
+        state.propuestas = res.data;
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { redraw(); });
+  }
+
+  // ---- Conciliacion (fase 6): carga lazy al abrir la pestaña por primera
+  // vez, con boton "Actualizar" para refrescar manualmente despues. ----
+  function cargarConciliacion() {
+    state.conciliacionLoading = true; redraw();
+    VEVA.gas('getConciliacionPagos')
+      .then(function (res) {
+        if (res.status !== 'success') { state.error = res.message; return; }
+        state.conciliacionData = res.data;
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.conciliacionLoading = false; redraw(); });
+  }
+
+  function cargarCandidatos(partidaId) {
+    state.conciliacionCandidatosLoading[partidaId] = true;
+    redraw();
+    VEVA.gas('buscarCandidatosMovimiento', { partidaId: partidaId })
+      .then(function (res) {
+        if (res.status !== 'success') { state.conciliacionCandidatos[partidaId] = { error: res.message, candidatos: [] }; return; }
+        state.conciliacionCandidatos[partidaId] = res.data;
+        var sel = {};
+        (res.data.candidatos || []).forEach(function (c) { if (c.yaVinculado) sel[c.idMov] = c.montoAplicadoActual; });
+        state.conciliacionSeleccion[partidaId] = sel;
+      })
+      .catch(function (e) { state.conciliacionCandidatos[partidaId] = { error: String(e.message || e), candidatos: [] }; })
+      .finally(function () { state.conciliacionCandidatosLoading[partidaId] = false; redraw(); });
+  }
+
+  function conciliar(p, sel) {
+    var movimientos = Object.keys(sel).map(function (idMov) { return { idMov: idMov, montoAplicado: sel[idMov] }; });
+    VEVA.gas('conciliarPartida', { partidaId: p.id, movimientos: movimientos })
+      .then(function (res) {
+        if (res.status !== 'success') { state.error = res.message; redraw(); return; }
+        state.conciliacionMatchOpen[p.id] = false;
+        cargarConciliacion();
+      })
+      .catch(function (e) { state.error = String(e.message || e); redraw(); });
+  }
+
+  // ---- Comprobantes (fase 7) ----
+  function cargarComprobantes() {
+    state.comprobantesLoading = true; redraw();
+    VEVA.gas('getComprobantesPago')
+      .then(function (res) {
+        if (res.status !== 'success') { state.error = res.message; return; }
+        state.comprobantesData = res.data;
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.comprobantesLoading = false; redraw(); });
+  }
+
+  function desvincular(comprobanteId, partidaId) {
+    VEVA.gas('desvincularComprobante', { comprobanteId: comprobanteId, partidaId: partidaId })
+      .then(function (res) {
+        if (res.status !== 'success') { state.error = res.message; redraw(); return; }
+        cargarComprobantes();
+      })
+      .catch(function (e) { state.error = String(e.message || e); redraw(); });
+  }
+
+  /** Selector de archivo nativo (sin input visible en el DOM, igual de
+   * espiritu que carga-mov/carga de propuesta: leer en el navegador,
+   * nunca escribir hasta tener el archivo completo). Lee como Data URL
+   * y manda solo la parte base64 al backend. */
+  function abrirSelectorArchivo(partidaIds) {
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.pdf,.jpg,.jpeg,.png';
+    input.addEventListener('change', function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function (ev) {
+        var base64 = ev.target.result.split(',')[1];
+        VEVA.gas('subirComprobante', { archivoNombre: file.name, base64: base64, mimeType: file.type, partidaIds: partidaIds })
+          .then(function (res) {
+            if (res.status !== 'success') { state.error = res.message; redraw(); return; }
+            state.comprobantesSeleccion = {};
+            cargarComprobantes();
+          })
+          .catch(function (e2) { state.error = String(e2.message || e2); redraw(); });
+      };
+      reader.readAsDataURL(file);
+    });
+    input.click();
+  }
+
+  function setCuentaPago(l, valor) {
+    l.cuentaPago = valor;
+    redraw();
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { cuentaPago: valor } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  function setPagoReal(l, moneda, tc) {
+    l.monedaPagoReal = moneda; l.tcAplicado = tc;
+    redraw();
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { monedaPagoReal: moneda, tcAplicado: tc } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  // ---- Carga de propuesta: leer .xlsx con SheetJS (misma tecnica que
+  // carga-mov), previsualizar en el backend (nunca escribe), confirmar
+  // solo lo que el usuario deje seleccionado. ----
+  function readFileAsAllSheets(file) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      if (ext === 'xlsx' || ext === 'xls') {
+        reader.onload = function (e) {
+          try {
+            var wb = XLSX.read(e.target.result, { type: 'binary' });
+            resolve(wb.SheetNames.map(function (nombre) { return { nombre: nombre, csv: XLSX.utils.sheet_to_csv(wb.Sheets[nombre]) }; }));
+          } catch (err) { reject(err); }
+        };
+        reader.onerror = reject;
+        reader.readAsBinaryString(file);
+      } else {
+        reject(new Error('Formato no soportado, sube un .xlsx'));
+      }
+    });
+  }
+
+  function cargaSeleccionarArchivo(file) {
+    if (!file) return;
+    state.cargaError = null; state.cargaPreview = null; state.cargaResultado = null; state.cargaExcluidos = {}; state.cargaMotivoForzado = '';
+    readFileAsAllSheets(file)
+      .then(function (sheets) { state.cargaArchivoNombre = file.name; state.cargaSheets = sheets; redraw(); })
+      .catch(function (e) { state.cargaError = 'No se pudo leer el archivo: ' + e.message; redraw(); });
+  }
+
+  /** Reset completo del panel de carga, de vuelta al dropzone -- usado
+   * por AMBOS botones "Cancelar" (con y sin preview generado). Hallazgo
+   * real de `qa`: limpiar solo cargaSheets/cargaPreview/cargaError dejaba
+   * campos fantasma (cargaArchivoNombre, cargaResultado, cargaExcluidos,
+   * cargaMotivoForzado) que podian filtrarse a la siguiente carga. */
+  function cargaCancelar() {
+    state.cargaSheets = null; state.cargaPreview = null; state.cargaError = null;
+    state.cargaResultado = null; state.cargaExcluidos = {}; state.cargaMotivoForzado = '';
+    state.cargaArchivoNombre = '';
+    redraw();
+  }
+
+  function cargaPrevisualizar() {
+    if (!state.cargaSheets) return;
+    state.cargaProcesando = true; state.cargaError = null; redraw();
+    VEVA.gas('previsualizarPropuestaPago', state.cargaSheets)
+      .then(function (res) {
+        if (res.status !== 'success') { state.cargaError = res.message; return; }
+        state.cargaPreview = res.data; state.cargaExcluidos = {};
+      })
+      .catch(function (e) { state.cargaError = String(e.message || e); })
+      .finally(function () { state.cargaProcesando = false; redraw(); });
+  }
+
+  /** Hallazgo real del usuario (Bloque C, 2026-07-27): cargó una propuesta
+   * de una sociedad ("Ventura"), el sistema confirmó éxito, pero después
+   * no la encontraba en ningún lado -- los datos SÍ se habían creado bien
+   * (confirmado leyendo confirmarCargaPropuestaPago en el backend, sin
+   * bug ahí); el problema real era que tenía un filtro de OTRA sociedad
+   * activo (`state.selectedSociedad`) de una navegación anterior, que
+   * ocultaba en silencio la propuesta recién creada -- ademas una partida
+   * recien importada nace en fase 'contabilidad' (Revision contable), no
+   * en la pestaña por defecto ('tesoreria'). Fix: tras confirmar con
+   * éxito, se ajusta el filtro/pestaña para que el usuario aterrice
+   * directo en lo que acaba de crear -- si se cargó UNA sola sociedad, se
+   * filtra a esa; si se cargaron varias a la vez, se limpia el filtro
+   * (nunca se deja uno viejo que pueda ocultar alguna de las nuevas). */
+  /** Pieza 2 (2026-07-28, pedido explicito del usuario): cuantas lineas
+   * duplicadas (UUID ya existente, marcadas `duplicado` por el preview)
+   * siguen INCLUIDAS -- es decir, el usuario no las excluyo con el
+   * checkbox que ya existia. Solo estas exigen motivo -- si el usuario
+   * ya excluyo la duplicada a mano, no hace falta forzar nada. */
+  function cargaDuplicadosPendientes() {
+    if (!state.cargaPreview) return 0;
+    var n = 0;
+    state.cargaPreview.propuestasPreview.forEach(function (g) {
+      g.lineas.forEach(function (l) { if (l.duplicado && !state.cargaExcluidos[l.tempId]) n++; });
+    });
+    return n;
+  }
+
+  function cargaConfirmar() {
+    if (!state.cargaPreview) return;
+    var propuestas = state.cargaPreview.propuestasPreview.map(function (g) {
+      return { sociedad: g.sociedad, lineas: g.lineas.filter(function (l) { return !state.cargaExcluidos[l.tempId]; }), ccExtra: g.ccExtra || [] };
+    }).filter(function (g) { return g.lineas.length; });
+    if (!propuestas.length) { state.cargaError = 'No hay líneas seleccionadas para crear.'; redraw(); return; }
+    var duplicadosPendientes = cargaDuplicadosPendientes();
+    var motivo = (state.cargaMotivoForzado || '').trim();
+    if (duplicadosPendientes && !motivo) {
+      state.cargaError = 'Hay ' + duplicadosPendientes + ' línea(s) con UUID ya cargado antes. Excluyelas, o captura el motivo para forzar la carga de todas formas.';
+      redraw();
+      return;
+    }
+    state.cargaProcesando = true; state.cargaError = null; redraw();
+    VEVA.gas('confirmarCargaPropuestaPago', { propuestas: propuestas, forzarDuplicados: duplicadosPendientes > 0, motivoForzado: motivo })
+      .then(function (res) {
+        if (res.status !== 'success') { state.cargaError = res.message; return; }
+        state.cargaResultado = res; state.cargaSheets = null; state.cargaPreview = null; state.cargaArchivoNombre = ''; state.cargaMotivoForzado = '';
+        var sociedadesCreadas = uniq((res.data.propuestasCreadas || []).map(function (p) { return p.sociedad; }));
+        state.selectedSociedad = sociedadesCreadas.length === 1 ? sociedadesCreadas[0] : null;
+        state.activeTab = 'contabilidad';
+        cargar();
+      })
+      .catch(function (e) { state.cargaError = String(e.message || e); })
+      .finally(function () { state.cargaProcesando = false; redraw(); });
+  }
+
+  // ---- Filtro activo: una pestana de fase muestra solo lineas activas de
+  // esa fase; Rechazadas/Caducadas muestran lineas de esa fase de origen,
+  // de cualquier fase, agrupadas igual. ----
+  function lineasEnFiltro(p, tab) {
+    if (isEstadoTab(tab)) {
+      var estado = estadoForTab(tab);
+      return p.lineas.filter(function (l) { return l.estado === estado; });
+    }
+    return p.lineas.filter(function (l) { return l.fase === tab && l.estado === 'activa'; });
+  }
+  function uniqProveedores(lineas) { return uniq(lineas.map(function (l) { return l.proveedor; })).length; }
+  function groupByProveedor(lineas) {
+    var map = {}, order = [];
+    lineas.forEach(function (l) { if (!map[l.proveedor]) { map[l.proveedor] = []; order.push(l.proveedor); } map[l.proveedor].push(l); });
+    return order.map(function (prov) { return { proveedor: prov, lineas: map[prov] }; });
+  }
+  function contarPropYProv(tab, sociedad) {
+    var props = state.propuestas.filter(function (p) { return (!sociedad || p.sociedad === sociedad) && lineasEnFiltro(p, tab).length > 0; });
+    var proveedores = props.reduce(function (s, p) { return s + uniqProveedores(lineasEnFiltro(p, tab)); }, 0);
+    return { propuestas: props.length, proveedores: proveedores };
+  }
+  // 'SIN_MONEDA' es una clave aparte, nunca se funde con 'MXN' -- ver
+  // fmtMontoDivisa arriba, mismo motivo (hallazgo del revisor).
+  function totalesPorDivisa(lineas) {
+    var map = {};
+    lineas.forEach(function (l) { var m = l.moneda || 'SIN_MONEDA'; map[m] = (map[m] || 0) + Number(l.monto || 0); });
+    return Object.keys(map).sort().map(function (m) { return { moneda: m, total: map[m] }; });
+  }
+  /** Una linea 'parcial' se autoriza/paga por MONTO_AUTORIZADO, no por el
+   * MONTO completo de la factura -- usar el monto crudo en cualquier
+   * resumen la sobreestimaria (hallazgo del revisor). Mismo criterio que
+   * ya usaba el resumen de acciones masivas por propuesta, ahora
+   * centralizado para que el resumen de seleccion global (sticky) no
+   * diverja. */
+  function montoEfectivo(l) { return l.approvalType === 'parcial' ? (Number(l.montoAutorizado) || 0) : Number(l.monto); }
+  /** Saldo pendiente de aplicar de una partida -- FUENTE UNICA (hallazgo
+   * real del revisor, Pieza 1, 2026-07-28: existian 2 formulas de
+   * fallback distintas para el mismo numero, una en renderCeldasAplicado
+   * y otra en montoResolverAplicado, enmascarada porque el backend hoy
+   * siempre manda saldoPendienteAplicar ya calculado -- pero divergian si
+   * algun dia esa columna faltara). Prioriza el valor ya resuelto por el
+   * backend; si no viene, calcula objetivo-acumulado igual que
+   * getConciliacionPagos/getPropuestasPago. */
+  function _saldoPendienteAplicar(l) {
+    if (l.saldoPendienteAplicar != null) return l.saldoPendienteAplicar;
+    var acumulado = l.montoAplicadoAcumulado || 0;
+    var objetivo = l.montoEfectivoTotal != null ? l.montoEfectivoTotal : montoEfectivo(l);
+    return Math.max(0, objetivo - acumulado);
+  }
+  /** Monto real que resolverAplicado va a enviar por una linea marcada
+   * en positivo -- extraido para que el resumen de totales (Pieza 1,
+   * 2026-07-28) use EXACTAMENTE la misma formula que la accion real, sin
+   * riesgo de que el total mostrado diverja de lo que en verdad se
+   * manda al backend. */
+  function montoResolverAplicado(l) {
+    var saldo = _saldoPendienteAplicar(l);
+    return (l._resolverMonto != null && l._resolverMonto !== '') ? Number(l._resolverMonto) : saldo;
+  }
+  /** Punto 4 de la retroalimentacion: gran total en una sola cifra usando
+   * el TC actual (MXN + USD*tc). GBP/SIN_MONEDA se dejan fuera del
+   * blended total a proposito -- no hay TC confiable para ellas hoy --
+   * y se muestran aparte para no fingir precision que no existe. */
+  function granTotalConTc(chips) {
+    return chips.reduce(function (s, t) {
+      if (t.moneda === 'MXN') return s + t.total;
+      if (t.moneda === 'USD') return s + t.total * (state.tcActual || 1);
+      return s;
+    }, 0);
+  }
+  /** Pedido del usuario (2026-07-28): "en cada fase, siempre llevar el
+   * control de totales, para saber cuanto es el importe que se libera en
+   * moneda origen y mxn". Centraliza el texto "MXN $X · USD $Y · ≈ MXN $Z
+   * (TC W)" para que la barra sticky global (renderResumenSeleccion) y
+   * las barras de resumen por fase nunca diverjan -- antes cada una
+   * armaba su propio texto por separado (y la de por fase ni siquiera
+   * desglosaba moneda, sumaba todo en una sola cifra sin sentido,
+   * hallazgo real de auditoria). `montoGetter` decide que campo de cada
+   * linea se suma (montoEfectivo para la mayoria de casos; en Aplicado,
+   * el monto real que se va a aplicar puede diferir si el usuario
+   * capturo un parcial -- ver montoResolverAplicado). */
+  function resumenChipsTexto(lineas, montoGetter) {
+    var chips = totalesPorDivisa(lineas.map(function (l) { return { moneda: l.moneda, monto: montoGetter(l) }; }));
+    if (!chips.length) return '';
+    var texto = chips.map(function (t) { return (t.moneda === 'SIN_MONEDA' ? '⚠' : t.moneda) + ' ' + fmtMonto(t.total); }).join(' · ');
+    return texto + ' · ≈ MXN ' + fmtMonto(granTotalConTc(chips)) + ' (TC ' + Number(state.tcActual || 1).toFixed(2) + ')';
+  }
+
+  // ---- Mutaciones: actualiza estado local (optimista) + llama backend + redibuja ----
+  function patchLineaLocal(l, patch) { Object.assign(l, patch); }
+
+  // setType toca uno de los campos mas sensibles del flujo (monto
+  // autorizado) por linea -- igual que bulkAction, un
+  // .catch() solo no basta: updatePartidaPago puede resolver con
+  // {status:'error'} sin rechazar la promesa (ej. monto invalido). Si
+  // pasa, se resincroniza el tablero completo con cargar() en vez de
+  // dejar el optimista local mostrado como si se hubiera guardado
+  // (mismo hallazgo del revisor, ya corregido en las acciones en bloque).
+  function setType(l, type) {
+    patchLineaLocal(l, { approvalType: type, montoAutorizado: type === 'total' ? l.monto : l.montoAutorizado });
+    redraw();
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { approvalType: l.approvalType, montoAutorizado: l.montoAutorizado } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  /** Bloque F (2026-07-28, rediseño pedido por el usuario): "Banca" y
+   * "Aplicado" ya no usan pastilla-clic ni input+boton individual --
+   * cada linea tiene 2 checkboxes efimeros (l._resolverPositivo /
+   * l._resolverNegativo, nunca persistidos, se auto-excluyen entre si al
+   * marcar uno -- ver renderCheckboxResolver) y un solo boton de lote por
+   * fase resuelve TODAS las marcadas de una vez, en una sola llamada al
+   * backend, para que el correo de esa transicion salga en un solo
+   * mensaje con 2 secciones (liberadas/aplicadas primero, no
+   * liberadas/no aplicadas despues, con su motivo). Una linea sin
+   * ninguna de las 2 marcada se queda en standby -- no avanza, no genera
+   * correo. Los flags efimeros nunca se inicializan a mano: tanto
+   * cargar() como recargarPropuestas() reemplazan state.propuestas por
+   * objetos nuevos del servidor, asi que quedan `undefined` (falsy) de
+   * forma natural en cada recarga. */
+  function renderCheckboxResolver(l, campo, onToggle) {
+    var cb = VEVA.dom.el('input', { type: 'checkbox', class: campo === '_resolverNegativo' ? 'accent-red-600' : 'accent-[#635bff]' }, []);
+    cb.checked = !!l[campo];
+    cb.addEventListener('change', function (e) { onToggle(e.target.checked); });
+    return VEVA.dom.el('div', { class: 'flex justify-center' }, [cb]);
+  }
+
+  /** Grupo 4 (2026-07-31, retroalimentacion de diseno): "seleccionar
+   * todas"/"por proveedor" para Banca/Aplicado -- estas 2 fases NO usan
+   * l.checked (retirado del Bloque F), asi que el selAllCb/checkbox de
+   * grupo de siempre (deshabilitados a proposito ahi) no aplican. Marca
+   * en lote los flags efimeros _resolverPositivo/_resolverNegativo sobre
+   * el array de lineas que le pasen (toda la propuesta visible, o solo
+   * las de un proveedor). campo=null limpia ambos flags (Quitar marca). */
+  function marcarResolverLote(lineas, campo) {
+    lineas.forEach(function (l) {
+      l._resolverPositivo = campo === '_resolverPositivo';
+      l._resolverNegativo = campo === '_resolverNegativo';
+    });
+    redraw();
+  }
+
+  /** Boton de accion en lote con feedback de "en proceso" (Grupo 2,
+   * pedido del usuario: los botones no daban ninguna senal de que la
+   * peticion estaba en curso, favoreciendo el doble-clic). Mismo patron
+   * visual (icono girando + texto cambiado + disabled) que ya usaba el
+   * panel de carga de propuesta (cargaPrevisualizar/cargaConfirmar). Un
+   * solo flag global (state.accionEnProceso) basta porque solo los
+   * botones de la pestaña/fase activa estan montados a la vez. */
+  function renderBulkBtn(label, labelEnProceso, onClick, variant) {
+    var clase = (variant === 'secundario'
+      ? 'px-2.5 py-1 border border-[#e6ebf1] rounded text-[11px] hover:border-[#635bff]'
+      : 'px-2.5 py-1 bg-[#635bff] text-white rounded text-[11px] font-semibold')
+      + ' disabled:opacity-50 flex items-center gap-1';
+    return VEVA.dom.el('button', {
+      class: clase, onClick: onClick, disabled: state.accionEnProceso ? 'disabled' : null
+    }, [state.accionEnProceso ? VEVA.icon('loader', 11, 'animate-spin') : null, state.accionEnProceso ? labelEnProceso : label]);
+  }
+
+  function resolverBanca(lineas) {
+    var idsPositivos = lineas.filter(function (l) { return l._resolverPositivo; }).map(function (l) { return l.id; });
+    var idsNegativos = lineas.filter(function (l) { return l._resolverNegativo; }).map(function (l) { return l.id; });
+    if (!idsPositivos.length && !idsNegativos.length) return;
+    state.accionEnProceso = true; redraw();
+    // recargarPropuestas() ya no limpia state.error por si misma (ver su
+    // comentario) -- como esta funcion la llama SIEMPRE, exito o fallo,
+    // es responsabilidad propia limpiar el error previo cuando SI hay
+    // exito, para no dejar un banner viejo pegado indefinidamente.
+    VEVA.gas('bulkResolverBanca', { idsPositivos: idsPositivos, idsNegativos: idsNegativos })
+      .then(function (res) { state.error = res.status !== 'success' ? res.message : null; })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.accionEnProceso = false; recargarPropuestas(); });
+  }
+
+  /** Mismo criterio que autorizarSeleccionadas: bloquear TODA la tanda
+   * si alguna partida marcada para aplicar no tiene CUENTA_PAGO
+   * capturada, en vez de dejar que el backend rechace partida por
+   * partida (2026-07-26, cuenta obligatoria antes de marcar Pagada).
+   * El monto por linea sigue siendo el saldo pendiente completo salvo
+   * que el usuario haya capturado un parcial en l._resolverMonto (Bloque
+   * B, 2026-07-27, capacidad preservada explicitamente por el usuario al
+   * pedir este rediseño -- ver PROJECT_STATUS.md). */
+  function resolverAplicado(lineas) {
+    var aMarcarAplicar = lineas.filter(function (l) { return l._resolverPositivo; });
+    var sinCuenta = aMarcarAplicar.filter(function (l) { return !l.cuentaPago; });
+    if (sinCuenta.length) {
+      state.error = sinCuenta.length + ' partida(s) marcadas para aplicar sin cuenta de pago capturada. Selecciona la cuenta antes de resolver.';
+      redraw();
+      return;
+    }
+    var aplicar = aMarcarAplicar.map(function (l) {
+      return { partidaId: l.id, monto: montoResolverAplicado(l) };
+    });
+    var idsNoPagado = lineas.filter(function (l) { return l._resolverNegativo; }).map(function (l) { return l.id; });
+    if (!aplicar.length && !idsNoPagado.length) return;
+    state.accionEnProceso = true; redraw();
+    // Mismo criterio que resolverBanca: limpiar el error propio en exito,
+    // ya que recargarPropuestas() ya no lo hace por si misma.
+    VEVA.gas('bulkResolverAplicado', { aplicar: aplicar, idsNoPagado: idsNoPagado })
+      .then(function (res) { state.error = res.status !== 'success' ? res.message : null; })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.accionEnProceso = false; recargarPropuestas(); });
+  }
+
+  // Hallazgo real del revisor (bloque de acceso, 2026-07-26): estas 6
+  // funciones (aqui y abajo) solo tenian `.catch()` para rechazos de red
+  // -- nunca revisaban `res.status`. Como updatePartidaPago/
+  // setPartidasPagoChecked ahora pueden resolver (no rechazar) con
+  // {status:'error'} si el gate de acceso nuevo rechaza (ej. a alguien
+  // le quitan el rol en CAT_USUARIOS con la pestaña ya abierta), esas
+  // acciones fallaban en silencio: el cambio se veia "guardado" en la UI
+  // optimista pero nunca llegaba al backend. Mismo patron ya usado por
+  // bulkAction: revisar res.status y recargar el tablero desde la hoja
+  // si algo fallo, en vez de dejar el optimista como si hubiera pasado.
+  function setComentario(l, texto) {
+    l.comentario = texto;
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { comentario: texto } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+  function setNotaAplicacion(l, texto) {
+    l.notaAplicacion = texto;
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { notaAplicacion: texto } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  /** patch incluye el avance de fase cuando corresponde -- no hay boton
+   * ni funcion de "avanzar fase" por separado, ver comentario de cabecera.
+   * Si el backend rechaza (ej. una partida del lote no paso una
+   * validacion), no basta con .catch() -- bulkUpdatePartidasPago resuelve
+   * la promesa con {status:'error'} en vez de rechazarla, asi que hay que
+   * revisar `res.status`. En vez de intentar revertir campo por campo el
+   * optimista que ya se aplico en varias lineas, se recarga el tablero
+   * completo desde la hoja (fuente de verdad) -- mas simple y mas
+   * confiable que un revert parcial (hallazgo del revisor). */
+  function bulkAction(lineas, patch) {
+    var ids = lineas.filter(function (l) { return l.checked; }).map(function (l) { return l.id; });
+    if (!ids.length) return;
+    lineas.forEach(function (l) { if (l.checked) Object.assign(l, patch); });
+    state.accionEnProceso = true;
+    redraw();
+    VEVA.gas('bulkUpdatePartidasPago', { partidaIds: ids, patch: patch })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); })
+      .finally(function () { state.accionEnProceso = false; redraw(); });
+  }
+
+  function bulkSetType(lineas, type) {
+    var seleccionadas = lineas.filter(function (l) { return l.checked; });
+    if (!seleccionadas.length) return;
+    seleccionadas.forEach(function (l) { l.approvalType = type; if (type === 'total') l.montoAutorizado = l.monto; });
+    redraw();
+    VEVA.gas('bulkUpdatePartidasPago', { partidaIds: seleccionadas.map(function (l) { return l.id; }), patch: { approvalType: type } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+    if (type === 'total') {
+      // montoAutorizado = el MONTO propio de cada linea -- distinto por
+      // linea, no cabe en el patch compartido de arriba (bulkUpdatePartidasPago
+      // aplica el MISMO patch a todos los ids). Se manda uno por uno para
+      // que quede persistido de verdad y no solo en la UI (mismo hallazgo
+      // que dejaba "Sel. -> Total" sin guardar el monto real en la hoja).
+      seleccionadas.forEach(function (l) {
+        VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { montoAutorizado: l.monto } })
+          .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+          .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+      });
+    }
+  }
+
+  function toggleLineChecked(l, checked) {
+    l.checked = checked;
+    VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { checked: checked } })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  /** Seleccion a nivel proveedor (punto 6: 3 niveles de seleccion --
+   * linea, proveedor, propuesta). Marca/desmarca todas las lineas del
+   * grupo de un jalon. */
+  function toggleGrupoChecked(grupo, checked) {
+    grupo.lineas.forEach(function (l) { l.checked = checked; });
+    redraw();
+    VEVA.gas('setPartidasPagoChecked', { partidaIds: grupo.lineas.map(function (l) { return l.id; }), checked: checked })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  function selectAllVisible(visible, checked) {
+    visible.forEach(function (l) { l.checked = checked; });
+    redraw();
+    VEVA.gas('setPartidasPagoChecked', { partidaIds: visible.map(function (l) { return l.id; }), checked: checked })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  function limpiarSeleccion(lineas) {
+    lineas.forEach(function (l) { l.checked = false; });
+    redraw();
+    VEVA.gas('setPartidasPagoChecked', { partidaIds: lineas.map(function (l) { return l.id; }), checked: false })
+      .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+      .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+  }
+
+  /** El patch de "Autorizar seleccionadas" no manda montoAutorizado, asi
+   * que la validacion de _updatePartidaPagoRow (backend) nunca se
+   * dispara para esta transicion -- una linea marcada "Parcial" sin un
+   * monto valido se autorizaria igual. Se valida aqui, ANTES de llamar
+   * a bulkAction, y se bloquea toda la tanda si alguna partida parcial
+   * no tiene un monto valido (hallazgo del revisor). */
+  function autorizarSeleccionadas(lineas) {
+    var seleccionadas = lineas.filter(function (l) { return l.checked; });
+    var invalidas = seleccionadas.filter(function (l) {
+      if (l.approvalType !== 'parcial') return false;
+      var v = Number(l.montoAutorizado);
+      return !(v > 0 && v <= l.monto);
+    });
+    if (invalidas.length) {
+      state.error = invalidas.length + ' partida(s) parciales sin un monto autorizado válido (mayor a cero y no mayor al monto original). Corrígelas antes de autorizar.';
+      redraw();
+      return;
+    }
+    // Camino por defecto (usuario nunca toco el pill T ni "Sel.->Total"):
+    // approvalType queda undefined, que la UI ya trata visualmente como
+    // "Total" (isParcial = approvalType==='parcial'). Sin este paso esa
+    // autorizacion se guardaba con MONTO_AUTORIZADO vacio -- se fija aqui
+    // al monto propio de la linea antes de autorizar (hallazgo del
+    // revisor: el hueco solo se habia cerrado para el camino explicito).
+    seleccionadas.forEach(function (l) { if (l.approvalType !== 'parcial') l.montoAutorizado = l.monto; });
+    bulkAction(lineas, { status: 'autorizada', fase: 'liberacion2' });
+    seleccionadas.forEach(function (l) {
+      if (l.approvalType === 'parcial') return; // ya trae su propio monto valido, no se pisa
+      VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { montoAutorizado: l.monto } })
+        .then(function (res) { if (res.status !== 'success') { state.error = res.message; recargarPropuestas(); } })
+        .catch(function (e) { state.error = String(e.message || e); recargarPropuestas(); });
+    });
+  }
+
+  function solicitarReactivacion(l) {
+    VEVA.gas('solicitarReactivacion', l.id)
+      .then(function (res) {
+        if (res.status !== 'success') { state.error = res.message; redraw(); return; }
+        // Tercer patron (hallazgo del revisor): esta funcion solo llama a
+        // recargarPropuestas() en el camino de EXITO -- como esa funcion
+        // ya no limpia state.error por si misma, hay que hacerlo aqui
+        // explicitamente o un error viejo de una accion anterior se queda
+        // pegado en pantalla aunque la reactivacion si haya funcionado.
+        state.error = null;
+        recargarPropuestas();
+      })
+      .catch(function (e) { state.error = String(e.message || e); redraw(); });
+  }
+
+  /** Celdas positivo/negativo de "Banca" y "Aplicado" (Bloque F,
+   * 2026-07-28). Dentro de estas 2 pestañas una línea SIEMPRE está sin
+   * resolver mientras sea visible ahí -- en cuanto se resuelve (positivo
+   * o negativo) sale del filtro de esa fase (avanza de `fase` o pasa a
+   * `estado:'rechazada'`), así que no hace falta contemplar aquí el caso
+   * "ya resuelta" salvo el terminal `pagado` de Aplicado (que sí se
+   * queda visible ahí, es la fase final). */
+  function renderCeldasBanca(l) {
+    if (!esTesoreria()) {
+      return { positivo: VEVA.dom.el('span', { class: 'text-[10px] text-[#8792a2] italic' }, ['pendiente']), negativo: VEVA.dom.el('span', {}, []) };
+    }
+    return {
+      positivo: renderCheckboxResolver(l, '_resolverPositivo', function (checked) { l._resolverPositivo = checked; if (checked) l._resolverNegativo = false; redraw(); }),
+      negativo: renderCheckboxResolver(l, '_resolverNegativo', function (checked) { l._resolverNegativo = checked; if (checked) l._resolverPositivo = false; redraw(); })
+    };
+  }
+
+  function renderCeldasAplicado(l) {
+    if (l.pagado) {
+      var ast = statusStyle('Pagada');
+      return { positivo: VEVA.dom.el('span', { class: 'text-[11px] font-semibold px-2.5 py-0.5 rounded-full text-center ' + ast.bg + ' ' + ast.text }, ['Pagada']), negativo: VEVA.dom.el('span', {}, []) };
+    }
+    var acumulado = l.montoAplicadoAcumulado || 0;
+    var objetivo = l.montoEfectivoTotal != null ? l.montoEfectivoTotal : montoEfectivo(l);
+    var saldo = _saldoPendienteAplicar(l);
+    var pst = statusStyle(acumulado > 0 ? 'Parcial' : '');
+    var progreso = VEVA.dom.el('span', { class: 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full ' + pst.bg + ' ' + pst.text }, [fmtMonto(acumulado) + '/' + fmtMonto(objetivo)]);
+
+    if (!esTesoreria()) return { positivo: progreso, negativo: VEVA.dom.el('span', {}, []) };
+    if (!l.cuentaPago) {
+      return {
+        positivo: VEVA.dom.el('div', { class: 'flex flex-col items-center gap-0.5' }, [progreso, VEVA.dom.el('span', { class: 'text-[9.5px] text-[#8792a2] italic' }, ['sel. cuenta'])]),
+        negativo: renderCheckboxResolver(l, '_resolverNegativo', function (checked) { l._resolverNegativo = checked; if (checked) l._resolverPositivo = false; redraw(); })
+      };
+    }
+
+    var cbAplicar = renderCheckboxResolver(l, '_resolverPositivo', function (checked) {
+      l._resolverPositivo = checked;
+      if (checked) { l._resolverNegativo = false; if (l._resolverMonto == null) l._resolverMonto = saldo.toFixed(2); }
+      redraw();
+    });
+    var montoInput = VEVA.dom.el('input', {
+      type: 'number', min: '0.01', max: saldo.toFixed(2), step: '0.01',
+      'data-focus-key': 'resolvermonto-' + l.id,
+      class: 'w-[62px] h-5 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' + (l._resolverPositivo ? '' : ' opacity-40')
+    }, []);
+    montoInput.value = l._resolverMonto != null ? l._resolverMonto : saldo.toFixed(2);
+    montoInput.disabled = !l._resolverPositivo;
+    montoInput.addEventListener('change', function (e) { l._resolverMonto = e.target.value; });
+
+    return {
+      positivo: VEVA.dom.el('div', { class: 'flex flex-col items-center gap-0.5' }, [progreso, VEVA.dom.el('div', { class: 'flex items-center gap-1' }, [cbAplicar, montoInput])]),
+      negativo: renderCheckboxResolver(l, '_resolverNegativo', function (checked) { l._resolverNegativo = checked; if (checked) l._resolverPositivo = false; redraw(); })
+    };
+  }
+
+  // ---- Render: una linea (partida) individual. mostrarProveedor=false
+  // cuando ya se muestra en el encabezado del grupo (proveedor repetido). ----
+  function renderLineRow(l, tab, mostrarProveedor, sociedad) {
+    var isParcial = l.approvalType === 'parcial';
+    // Pieza 1 (2026-07-28): en Banca/Aplicado este checkbox no tiene
+    // ningun efecto real desde el Bloque F -- la accion real usa
+    // l._resolverPositivo/_resolverNegativo, no l.checked. Se deja
+    // visible pero deshabilitado (en vez de quitar la columna, que
+    // obligaria a rehacer el grid compartido con las otras 3 fases) para
+    // no confundir al usuario pensando que selecciona algo que hace.
+    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: (tab === 'banca' || tab === 'aplicado') ? 'disabled' : null, title: (tab === 'banca' || tab === 'aplicado') ? 'No aplica en esta fase — usa Subir/Rechazar o Aplicar/No pagado' : null }, []);
+    cb.checked = !!l.checked;
+    cb.addEventListener('change', function (e) { toggleLineChecked(l, e.target.checked); });
+
+    var provCell = VEVA.dom.el('div', { class: 'min-w-0' }, []);
+    if (mostrarProveedor) {
+      provCell = VEVA.dom.el('div', { class: 'min-w-0 flex items-baseline gap-1.5' }, [
+        l.numeroProveedor ? VEVA.dom.el('span', { class: 'font-mono text-[9.5px] text-[#8792a2] flex-shrink-0' }, [String(l.numeroProveedor)]) : null,
+        VEVA.dom.el('span', { class: 'text-[12px] font-semibold truncate', title: l.proveedor }, [l.proveedor || '—'])
+      ].filter(Boolean));
+    }
+
+    var authCell = VEVA.dom.el('div', {}, []);
+    if (tab === 'tesoreria' && esTesoreria()) {
+      var pillT = VEVA.dom.el('button', { class: 'px-2.5 py-1 rounded-l-full text-[11px] font-semibold ' + (!isParcial ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386]'), onClick: function () { setType(l, 'total'); } }, ['T']);
+      var pillP = VEVA.dom.el('button', { class: 'px-2.5 py-1 rounded-r-full text-[11px] font-semibold ' + (isParcial ? 'bg-[#635bff] text-white' : 'bg-[#f6f9fc] text-[#697386]'), onClick: function () { setType(l, 'parcial'); } }, ['P']);
+      var authChildren = [VEVA.dom.el('div', { class: 'inline-flex' }, [pillT, pillP])];
+      if (isParcial) {
+        // min/max en el input son solo primera linea de defensa (UX); la
+        // validacion real (que no exceda el monto original, que sea > 0)
+        // vive en el backend -- ver _updatePartidaPagoRow. Si el backend
+        // rechaza, se revierte el valor local en vez de dejarlo mostrado
+        // como si se hubiera guardado (hallazgo del revisor).
+        var amtInput = VEVA.dom.el('input', { type: 'number', min: '0.01', max: String(l.monto), step: '0.01', 'data-focus-key': 'monto-' + l.id, class: 'w-[88px] h-6 border border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff] ml-1.5' }, []);
+        amtInput.value = l.montoAutorizado;
+        amtInput.addEventListener('change', function (e) {
+          var anterior = l.montoAutorizado;
+          l.montoAutorizado = Number(e.target.value);
+          redraw();
+          VEVA.gas('updatePartidaPago', { partidaId: l.id, patch: { montoAutorizado: l.montoAutorizado } })
+            .then(function (res) {
+              if (res.status !== 'success') { l.montoAutorizado = anterior; state.error = res.message; redraw(); }
+            })
+            .catch(function (err) { l.montoAutorizado = anterior; state.error = String(err.message || err); redraw(); });
+        });
+        authChildren.push(amtInput);
+      }
+      authCell = VEVA.dom.el('div', { class: 'flex items-center' }, authChildren);
+    } else if (tab === 'aplicado' && esTesoreria()) {
+      // Reusa este mismo slot (vacio en la pestaña Aplicado para
+      // cualquier otro tab) para CUENTA_PAGO -- de que cuenta se pago,
+      // necesario para poder agrupar Sociedad->Banco en la pestaña de
+      // Conciliacion ANTES de que exista un match real -- y, solo si la
+      // partida no es MXN, moneda real de pago + TC (2026-07-26, ver
+      // seccion 3.3 del prompt). Cero columnas nuevas en la tabla.
+      //
+      // Hallazgo real del revisor (2026-07-26, bloque cuenta-obligatoria):
+      // este slot antes solo se mostraba con `l.pagado` ya en true -- un
+      // candado circular, porque la validacion nueva exige CUENTA_PAGO
+      // ANTES de poder pasar a pagado:true. Se quita `&& l.pagado` para
+      // que el selector este disponible tambien mientras la partida sigue
+      // sin pagar (es cuando de verdad hace falta capturarlo).
+      var cuentasSoc = (state.catalogoCuentas || []).filter(function (c) { return c.nombreCorto === sociedad; });
+      var selCuenta = VEVA.dom.el('select', { class: 'w-full h-6 border border-[#e6ebf1] rounded px-1 text-[10.5px] outline-none focus:border-[#635bff]' },
+        [VEVA.dom.el('option', { value: '' }, ['Cuenta de pago...'])].concat(cuentasSoc.map(function (c) {
+          return VEVA.dom.el('option', { value: c.cuenta }, [(c.banco || '?') + ' ••' + String(c.cuenta).slice(-4)]);
+        })));
+      selCuenta.value = l.cuentaPago || '';
+      selCuenta.addEventListener('change', function (e) { setCuentaPago(l, e.target.value); });
+      var authChildrenAplicado = [selCuenta];
+
+      if (l.moneda && l.moneda !== 'MXN') {
+        // Bug real reportado 2026-07-28: el TC solo se podia capturar si
+        // se elegia convertir la liquidacion a MXN -- una partida que se
+        // paga en su propia moneda extranjera (USD/GBP/EUR, sin
+        // convertir) se quedaba sin forma de registrar el TC usado. Fix:
+        // el input de TC ya NO depende de la eleccion de moneda de pago
+        // real -- se puede capturar siempre que la partida no sea MXN.
+        // Si monedaPagoReal queda igual a la moneda propia, el TC es
+        // solo informativo (_montoEfectivoPartida en el backend no lo
+        // aplica al monto exigido salvo que monedaPagoReal SI difiera).
+        var selMonedaReal = VEVA.dom.el('select', { class: 'h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, [
+          VEVA.dom.el('option', { value: l.moneda }, [l.moneda + ' (igual)']),
+          VEVA.dom.el('option', { value: 'MXN' }, ['MXN (acuerdo)'])
+        ]);
+        var monedaRealActual = l.monedaPagoReal || l.moneda;
+        selMonedaReal.value = monedaRealActual === 'MXN' ? 'MXN' : l.moneda;
+        var inputTc = VEVA.dom.el('input', { type: 'number', step: '0.0001', placeholder: 'TC', class: 'w-14 h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, []);
+        inputTc.value = l.tcAplicado || '';
+        selMonedaReal.addEventListener('change', function (e) {
+          l.monedaPagoReal = e.target.value;
+          redraw();
+          if (l.tcAplicado) setPagoReal(l, e.target.value, l.tcAplicado);
+        });
+        inputTc.addEventListener('change', function (e) {
+          setPagoReal(l, l.monedaPagoReal || l.moneda, e.target.value);
+        });
+        var tcNum = Number(l.tcAplicado);
+        var mxnEquiv = tcNum > 0 ? VEVA.dom.el('span', { class: 'text-[9.5px] text-[#8792a2] font-mono' }, ['≈ MXN ' + fmtMonto(Number(l.monto) * tcNum)]) : null;
+        authChildrenAplicado.push(VEVA.dom.el('div', { class: 'flex flex-col gap-0.5 mt-1' }, [
+          VEVA.dom.el('div', { class: 'flex gap-1' }, [selMonedaReal, inputTc]),
+          mxnEquiv
+        ].filter(Boolean)));
+      }
+      authCell = VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, authChildrenAplicado);
+    } else if (tab === 'aplicado' && l.cuentaPago) {
+      authCell = VEVA.dom.el('span', { class: 'text-[10.5px] text-[#697386] font-mono' }, ['••' + String(l.cuentaPago).slice(-4)]);
+    }
+
+    var statusCell = VEVA.dom.el('span', {}, []);
+    var celdaPositivo = null, celdaNegativo = null;
+    if (tab === 'tesoreria' && l.status === 'autorizada') {
+      var st = statusStyle('Autorizada');
+      statusCell = VEVA.dom.el('span', { class: 'text-[11px] font-semibold px-2.5 py-0.5 rounded-full text-center ' + st.bg + ' ' + st.text }, ['Autorizada']);
+    } else if (tab === 'banca') {
+      var celdasB = renderCeldasBanca(l);
+      celdaPositivo = celdasB.positivo; celdaNegativo = celdasB.negativo;
+    } else if (tab === 'aplicado') {
+      var celdasA = renderCeldasAplicado(l);
+      celdaPositivo = celdasA.positivo; celdaNegativo = celdasA.negativo;
+    }
+
+    // COMENTARIO: por que sigue bloqueado -- se oculta justo al terminar.
+    var commentCell = VEVA.dom.el('span', {}, []);
+    if ((tab === 'banca' && !l.subido) || (tab === 'aplicado' && !l.pagado)) {
+      var cmtInput = VEVA.dom.el('input', { 'data-focus-key': 'comentario-' + l.id, class: 'w-full h-6 border border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Comentario' }, []);
+      cmtInput.value = l.comentario || '';
+      cmtInput.addEventListener('change', function (e) { setComentario(l, e.target.value); });
+      commentCell = cmtInput;
+    }
+    // NOTA_APLICACION: como se resolvio al pagar (TC, compra de divisa) --
+    // campo separado de COMENTARIO, visible solo una vez pagada.
+    if (tab === 'aplicado' && l.pagado) {
+      var notaInput = VEVA.dom.el('input', { 'data-focus-key': 'nota-' + l.id, class: 'w-full h-6 border border-dashed border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Nota de aplicacion (TC, compra de divisa...)' }, []);
+      notaInput.value = l.notaAplicacion || '';
+      notaInput.addEventListener('change', function (e) { setNotaAplicacion(l, e.target.value); });
+      commentCell = notaInput;
+    }
+
+    var esFaseResolver = (tab === 'banca' || tab === 'aplicado');
+    var filaBase = [
+      cb,
+      provCell,
+      VEVA.dom.el('span', { class: 'truncate text-[11px] text-[#697386]', title: l.referencia }, [l.referencia ? String(l.referencia) : '—']),
+      VEVA.dom.el('span', { class: 'truncate text-[12px]', title: l.desc }, [l.desc || '—']),
+      VEVA.dom.el('span', { class: 'text-right text-[12px] font-semibold' }, [fmtMontoDivisa(l.monto, l.moneda)]),
+      authCell
+    ];
+    var filaResto = esFaseResolver ? [celdaPositivo, celdaNegativo, commentCell] : [statusCell, commentCell];
+    return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc]', style: colHeadStyle(tab) }, filaBase.concat(filaResto));
+  }
+
+  var COL_HEAD_STYLE = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 90px 1fr';
+  var COL_HEAD_STYLE_RESOLVER = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 60px 60px 1fr';
+  function colHeadStyle(tab) { return (tab === 'banca' || tab === 'aplicado') ? COL_HEAD_STYLE_RESOLVER : COL_HEAD_STYLE; }
+  function renderColHead(tab) {
+    var cols = (tab === 'banca' || tab === 'aplicado')
+      ? ['', 'Proveedor', 'Referencia', 'Descripción', VEVA.dom.el('span', { class: 'text-right' }, ['Monto']), 'Autorización', (tab === 'banca' ? 'Subir' : 'Aplicar'), (tab === 'banca' ? 'Rechazar' : 'No pagado'), 'Comentario']
+      : ['', 'Proveedor', 'Referencia', 'Descripción', VEVA.dom.el('span', { class: 'text-right' }, ['Monto']), 'Autorización', 'Estatus', 'Comentario'];
+    return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
+  }
+
+  // ---- Render: grupo de proveedor repetido (2+ lineas en la misma
+  // propuesta) -- unico caso que se compacta/expande. Un proveedor con
+  // 1 sola linea se muestra directo como fila plana (renderLineRow),
+  // igual que el Excel original. ----
+  /** Grupo 4: botones "por proveedor" (Subir/Rechazar o Aplicar/No
+   * pagado) para la cabecera de un grupo-proveedor en Banca/Aplicado.
+   * Extraido de renderProveedorGrupo para no seguir engordandola
+   * (hallazgo de revisor: ya excedia el limite de ~20-30 lineas antes de
+   * este cambio). Gateado a Tesoreria -- mismo rol que ya protege estos
+   * botones a nivel de linea (renderCeldasBanca/Aplicado) y a nivel de
+   * propuesta (headBtns en renderPropuestaNode); sin este gate, un
+   * usuario sin ese rol veria y podria clicar botones que no le
+   * corresponden (hallazgo real de revisor, ronda 1). null si no aplica. */
+  function renderBotonesResolverGrupo(grupo, tab) {
+    if (!((tab === 'banca' || tab === 'aplicado') && esTesoreria())) return null;
+    var labelPos = tab === 'banca' ? 'Subir' : 'Aplicar';
+    var labelNeg = tab === 'banca' ? 'Rechazar' : 'No pagado';
+    var mkBtnGrupo = function (label, campo, claseExtra) {
+      var btn = VEVA.dom.el('button', { class: 'px-1.5 py-0.5 rounded text-[9.5px] font-semibold border ' + claseExtra }, [label]);
+      btn.addEventListener('click', function (e) { e.stopPropagation(); marcarResolverLote(grupo.lineas, campo); });
+      return btn;
+    };
+    return VEVA.dom.el('div', { class: 'flex gap-1 flex-shrink-0' }, [
+      mkBtnGrupo(labelPos, '_resolverPositivo', 'border-[#635bff]/30 text-[#635bff] hover:bg-[#635bff]/10'),
+      mkBtnGrupo(labelNeg, '_resolverNegativo', 'border-red-200 text-red-600 hover:bg-red-50')
+    ]);
+  }
+
+  function renderProveedorGrupo(p, grupo, tab) {
+    var key = p.id + '::' + grupo.proveedor;
+    var expanded = !!state.expandedProv[key];
+    var total = grupo.lineas.reduce(function (s, l) { return s + Number(l.monto); }, 0);
+    var todasChecked = grupo.lineas.every(function (l) { return l.checked; });
+    var algunaChecked = grupo.lineas.some(function (l) { return l.checked; });
+    var esResolver = tab === 'banca' || tab === 'aplicado';
+
+    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: esResolver ? 'disabled' : null, title: esResolver ? 'No aplica en esta fase — usa los botones de la derecha' : null }, []);
+    cb.checked = todasChecked;
+    cb.indeterminate = !todasChecked && algunaChecked;
+    cb.addEventListener('click', function (e) { e.stopPropagation(); });
+    cb.addEventListener('change', function (e) { toggleGrupoChecked(grupo, e.target.checked); });
+
+    var codigo = grupo.lineas[0].numeroProveedor ? String(grupo.lineas[0].numeroProveedor) : '';
+    var botonesResolverGrupo = renderBotonesResolverGrupo(grupo, tab);
+
+    var header = VEVA.dom.el('div', {
+      class: 'flex items-center justify-between px-2.5 py-1.5 cursor-pointer hover:bg-[#fafbff]',
+      onClick: function () { state.expandedProv[key] = !expanded; redraw(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 min-w-0' }, [
+        cb,
+        VEVA.icon(expanded ? 'chevron-down' : 'chevron-right', 11, 'text-[#697386]'),
+        codigo ? VEVA.dom.el('span', { class: 'font-mono text-[9.5px] text-[#8792a2] flex-shrink-0' }, [codigo]) : null,
+        VEVA.dom.el('span', { class: 'text-[12px] font-bold truncate' }, [grupo.proveedor]),
+        VEVA.dom.el('span', { class: 'text-[10px] text-[#697386] flex-shrink-0' }, [grupo.lineas.length + ' líneas'])
+      ].filter(Boolean)),
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 flex-shrink-0' }, [
+        botonesResolverGrupo,
+        VEVA.dom.el('span', { class: 'text-[12px] font-semibold' }, [fmtMonto(total)])
+      ].filter(Boolean))
+    ]);
+    var body = expanded ? VEVA.dom.el('div', { class: 'pl-6' }, grupo.lineas.map(function (l) { return renderLineRow(l, tab, false, p.sociedad); })) : null;
+    return VEVA.dom.el('div', { class: 'border-t border-dashed border-[#e6ebf1] bg-[#fbfcfe]' }, [header, body]);
+  }
+
+  /** Tabla de partidas estilo Excel/SAP: cada linea es su fila (el
+   * proveedor se repite tal cual si tiene una sola linea en distintas
+   * filas de proveedores distintos) -- solo se compacta cuando el MISMO
+   * proveedor tiene 2+ lineas dentro de esta propuesta (punto 6 de la
+   * retroalimentacion 2026-07-26). */
+  function renderTablaPartidas(p, proveedores, tab) {
+    var filas = [];
+    proveedores.forEach(function (g) {
+      if (g.lineas.length === 1) filas.push(renderLineRow(g.lineas[0], tab, true, p.sociedad));
+      else filas.push(renderProveedorGrupo(p, g, tab));
+    });
+    return filas;
+  }
+
+  // ---- Render: nodo Propuesta (nivel 2) ----
+  function renderPropuestaNode(p, tab) {
+    var lineas = lineasEnFiltro(p, tab);
+    var proveedores = groupByProveedor(lineas);
+    var expanded = !!state.expandedProp[p.id];
+    var totalProvPropuesta = uniqProveedores(p.lineas);
+
+    var header = VEVA.dom.el('div', {
+      class: 'flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#fafbff]',
+      onClick: function () { state.expandedProp[p.id] = !expanded; redraw(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 min-w-0' }, [
+        VEVA.icon(expanded ? 'chevron-down' : 'chevron-right', 12, 'text-[#697386]'),
+        VEVA.dom.el('span', { class: 'font-mono text-[12px] font-semibold' }, [p.folio]),
+        VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] truncate' }, [p.concepto || ''])
+      ]),
+      VEVA.dom.el('span', { class: 'font-mono text-[11px] text-[#697386] flex-shrink-0' }, [proveedores.length + ' de ' + totalProvPropuesta + ' proveedores'])
+    ]);
+
+    if (!expanded) return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-lg overflow-hidden' }, [header]);
+
+    var bodyChildren = [];
+
+    if (!isEstadoTab(tab)) {
+      // Chips de moneda: suma directa por divisa, sin conversion. Incluye
+      // TODAS las lineas (tambien rechazadas/caducadas) -- por eso lleva
+      // su propia etiqueta, para no confundirse con la barra de abajo que
+      // SI filtra solo activas. El "gran total" convertido con TC actual
+      // es el mismo calculo que alimenta el total a nivel sociedad (punto
+      // 4/5 de la retroalimentacion) -- una sola fuente de verdad.
+      // Hallazgo real de qa (2026-07-29, ronda de 20 pruebas): usaba
+      // `l.monto` crudo en vez de montoEfectivo(l) -- una linea con
+      // autorizacion parcial (approvalType==='parcial') se sobreestimaba
+      // con el monto completo de la factura en vez del monto autorizado,
+      // divergiendo del total que SI usa montoEfectivo en renderResumenSeleccion
+      // (la barra sticky). Mismo patron de envoltura que resumenChipsTexto.
+      var chipsProp = totalesPorDivisa(p.lineas.map(function (l) { return { moneda: l.moneda, monto: montoEfectivo(l) }; }));
+      var chips = chipsProp.map(function (t) {
+        var esSinMoneda = t.moneda === 'SIN_MONEDA';
+        return VEVA.dom.el('span', {
+          class: 'font-mono text-[10.5px] rounded px-2 py-0.5 border ' + (esSinMoneda ? 'bg-red-50 border-red-200 text-red-700 font-bold' : 'bg-[#f6f9fc] border-[#e6ebf1] text-[#697386]')
+        }, [(esSinMoneda ? '⚠ Sin moneda' : t.moneda) + ' ' + fmtMonto(t.total)]);
+      });
+      chips.push(VEVA.dom.el('span', { class: 'font-mono text-[10.5px] rounded px-2 py-0.5 border bg-[#635bff]/10 border-[#635bff]/30 text-[#5851e5] font-bold' }, ['≈ MXN ' + fmtMonto(granTotalConTc(chipsProp)) + ' (TC ' + Number(state.tcActual).toFixed(2) + ')']));
+      bodyChildren.push(VEVA.dom.el('div', { class: 'px-3 pt-2.5' }, [
+        VEVA.dom.el('div', { class: 'text-[10px] text-[#8792a2] uppercase tracking-wide mb-1' }, ['Total de la propuesta (incluye rechazadas/caducadas)']),
+        VEVA.dom.el('div', { class: 'flex flex-wrap gap-1.5' }, chips)
+      ]));
+
+      // Barra de distribucion: cuantos proveedores ACTIVOS hay en cada fase
+      // (deliberadamente excluye rechazadas/caducadas, a diferencia de los
+      // chips de arriba).
+      var lineasActivas = p.lineas.filter(function (l) { return l.estado === 'activa'; });
+      var dist = PHASE_ORDER.map(function (faseId) {
+        return { fase: faseId, n: uniq(lineasActivas.filter(function (l) { return l.fase === faseId; }).map(function (l) { return l.proveedor; })).length };
+      });
+      var distTotal = dist.reduce(function (s, d) { return s + d.n; }, 0) || 1;
+      var segs = dist.map(function (d) {
+        return VEVA.dom.el('div', { class: d.fase === tab ? 'bg-[#635bff]' : (d.n ? 'bg-[#c7c2ff]' : 'bg-[#e6ebf1]'), style: 'width:' + (100 * d.n / distTotal) + '%; height:100%;' }, []);
+      });
+      var otras = dist.filter(function (d) { return d.fase !== tab && d.n > 0; }).map(function (d) { return d.n + ' en ' + faseLabel(d.fase); }).join(' · ');
+      bodyChildren.push(VEVA.dom.el('div', { class: 'px-3 pt-2' }, [
+        VEVA.dom.el('div', { class: 'text-[10px] text-[#8792a2] uppercase tracking-wide mb-1' }, ['Solo partidas activas, por fase']),
+        VEVA.dom.el('div', { class: 'h-1.5 rounded-full overflow-hidden flex bg-[#e6ebf1]' }, segs),
+        otras ? VEVA.dom.el('div', { class: 'font-mono text-[10px] text-[#697386] mt-1' }, [otras]) : null
+      ]));
+    }
+
+    // Buscador + acciones masivas (solo tiene sentido en pestanas de fase).
+    var search = (state.lineSearch[p.id] || '').toLowerCase();
+    var visible = search ? proveedores.filter(function (g) { return g.proveedor.toLowerCase().indexOf(search) >= 0; }) : proveedores;
+
+    if (!isEstadoTab(tab)) {
+      var searchInput = VEVA.dom.el('input', { 'data-focus-key': 'buscar-' + p.id, class: 'w-[220px] h-7 border border-[#e6ebf1] rounded px-2 text-[12px] outline-none focus:border-[#635bff]', placeholder: 'Buscar proveedor...' }, []);
+      searchInput.value = state.lineSearch[p.id] || '';
+      searchInput.addEventListener('input', function (e) { state.lineSearch[p.id] = e.target.value; redraw(); });
+
+      var visibleLineas = visible.reduce(function (acc, g) { return acc.concat(g.lineas); }, []);
+      // Checkbox "seleccionar toda la propuesta" -- nivel 3 de seleccion
+      // (linea / proveedor / propuesta completa, punto 6).
+      var allChecked = visibleLineas.length > 0 && visibleLineas.every(function (l) { return l.checked; });
+      var selAllCb = VEVA.dom.el('input', {
+        type: 'checkbox',
+        disabled: (tab === 'banca' || tab === 'aplicado') ? 'disabled' : null,
+        title: (tab === 'banca' || tab === 'aplicado') ? 'No aplica en esta fase — usa Subir/Rechazar o Aplicar/No pagado' : 'Seleccionar toda la propuesta'
+      }, []);
+      selAllCb.checked = allChecked;
+      selAllCb.addEventListener('change', function (e) { selectAllVisible(visibleLineas, e.target.checked); });
+
+      var headBtns = [];
+      if (tab === 'tesoreria' && esTesoreria()) {
+        headBtns.push(VEVA.dom.el('button', { class: 'px-2.5 py-1 border border-[#e6ebf1] rounded text-[11px] hover:border-[#635bff]', onClick: function () { bulkSetType(lineas, 'total'); } }, ['Sel. → Total']));
+        headBtns.push(VEVA.dom.el('button', { class: 'px-2.5 py-1 border border-[#e6ebf1] rounded text-[11px] hover:border-[#635bff]', onClick: function () { bulkSetType(lineas, 'parcial'); } }, ['Sel. → Parcial']));
+      } else if ((tab === 'banca' || tab === 'aplicado') && esTesoreria()) {
+        // Grupo 4 (2026-07-31): "seleccionar todas" para Banca/Aplicado --
+        // selAllCb de arriba esta deshabilitado a proposito en estas 2
+        // pestañas (opera sobre l.checked, sin efecto aqui desde el
+        // Bloque F). Estos botones marcan _resolverPositivo/Negativo en
+        // lote sobre TODAS las lineas visibles (respeta el buscador).
+        var labelPosProp = tab === 'banca' ? 'Marcar todas: Subir' : 'Marcar todas: Aplicar';
+        var labelNegProp = tab === 'banca' ? 'Marcar todas: Rechazar' : 'Marcar todas: No pagado';
+        headBtns.push(VEVA.dom.el('button', { class: 'px-2.5 py-1 border border-[#635bff]/30 text-[#635bff] rounded text-[11px] hover:bg-[#635bff]/10', onClick: function () { marcarResolverLote(visibleLineas, '_resolverPositivo'); } }, [labelPosProp]));
+        headBtns.push(VEVA.dom.el('button', { class: 'px-2.5 py-1 border border-red-200 text-red-600 rounded text-[11px] hover:bg-red-50', onClick: function () { marcarResolverLote(visibleLineas, '_resolverNegativo'); } }, [labelNegProp]));
+        headBtns.push(VEVA.dom.el('button', { class: 'px-2.5 py-1 border border-[#e6ebf1] rounded text-[11px] hover:border-[#635bff]', onClick: function () { marcarResolverLote(visibleLineas, null); } }, ['Quitar marca']));
+      }
+      bodyChildren.push(VEVA.dom.el('div', { class: 'flex items-center gap-2.5 px-3 pt-2.5' }, [selAllCb, searchInput].concat(headBtns)));
+      bodyChildren.push(VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-lg mx-3 mt-2 overflow-hidden' }, [
+        renderColHead(tab),
+        VEVA.dom.el('div', { class: 'max-h-[320px] overflow-y-auto' }, renderTablaPartidas(p, visible, tab))
+      ]));
+
+      var selectedLines = lineas.filter(function (l) { return l.checked; });
+      var bulkBtns = [];
+      // Pedido del usuario (2026-07-28): en cada fase, ver siempre cuanto
+      // es el importe que se mueve, en moneda origen y su equivalente
+      // MXN -- antes esta barra sumaba monedas distintas en una sola
+      // cifra sin sentido (hallazgo real de auditoria), o en Banca/
+      // Aplicado ni siquiera mostraba monto, solo conteos.
+      var resumenNode = VEVA.dom.el('span', { class: 'text-[12px] text-[#697386]' }, [
+        selectedLines.length + ' partidas seleccionadas' + (selectedLines.length ? ' · ' + resumenChipsTexto(selectedLines, montoEfectivo) : '')
+      ]);
+      if (tab === 'contabilidad' && puedeActuar('Contador')) {
+        bulkBtns.push(renderBulkBtn('Liberar a Tesorería', 'Liberando...', function () { bulkAction(lineas, { fase: 'tesoreria' }); }, 'primario'));
+      } else if (tab === 'tesoreria' && esTesoreria()) {
+        bulkBtns.push(renderBulkBtn('Rechazar seleccionadas', 'Rechazando...', function () { bulkAction(lineas, { estado: 'rechazada' }); }, 'secundario'));
+        bulkBtns.push(renderBulkBtn('Autorizar seleccionadas', 'Autorizando...', function () { autorizarSeleccionadas(lineas); }, 'primario'));
+      } else if (tab === 'liberacion2' && puedeActuar('Contador')) {
+        bulkBtns.push(renderBulkBtn('Liberar seleccionadas', 'Liberando...', function () { bulkAction(lineas, { status: 'liberada', fase: 'banca' }); }, 'primario'));
+      } else if (tab === 'banca' && esTesoreria()) {
+        var posB = lineas.filter(function (l) { return l._resolverPositivo; });
+        var negB = lineas.filter(function (l) { return l._resolverNegativo; });
+        resumenNode = VEVA.dom.el('div', { class: 'flex flex-col' }, [
+          VEVA.dom.el('span', { class: 'text-[12px] font-semibold text-[#0a2540]' }, [posB.length + ' a subir' + (posB.length ? ' · ' + resumenChipsTexto(posB, montoEfectivo) : '')]),
+          negB.length ? VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2]' }, [negB.length + ' a rechazar · ' + resumenChipsTexto(negB, montoEfectivo)]) : null
+        ].filter(Boolean));
+        bulkBtns.push(renderBulkBtn('Resolver seleccionadas', 'Resolviendo...', function () { resolverBanca(lineas); }, 'primario'));
+      } else if (tab === 'aplicado' && esTesoreria()) {
+        var posA = lineas.filter(function (l) { return l._resolverPositivo; });
+        var negA = lineas.filter(function (l) { return l._resolverNegativo; });
+        resumenNode = VEVA.dom.el('div', { class: 'flex flex-col' }, [
+          VEVA.dom.el('span', { class: 'text-[12px] font-semibold text-[#0a2540]' }, [posA.length + ' a aplicar' + (posA.length ? ' · ' + resumenChipsTexto(posA, montoResolverAplicado) : '')]),
+          negA.length ? VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2]' }, [negA.length + ' a marcar no pagada · ' + resumenChipsTexto(negA, montoEfectivo)]) : null
+        ].filter(Boolean));
+        bulkBtns.push(renderBulkBtn('Resolver seleccionadas', 'Resolviendo...', function () { resolverAplicado(lineas); }, 'primario'));
+      }
+      if (bulkBtns.length) {
+        bodyChildren.push(VEVA.dom.el('div', { class: 'flex justify-between items-center mx-3 my-2.5 bg-white border border-[#e6ebf1] rounded-lg px-3 py-2' }, [
+          resumenNode,
+          VEVA.dom.el('div', { class: 'flex gap-2' }, bulkBtns)
+        ]));
+      }
+    } else if (tab === 'rechazadas') {
+      bodyChildren.push(VEVA.dom.el('div', { class: 'mx-3 my-2 bg-white border border-[#e6ebf1] rounded-lg overflow-hidden' }, lineas.map(function (l) { return renderRechazadaRow(l); })));
+    } else if (tab === 'caducadas') {
+      bodyChildren.push(VEVA.dom.el('div', { class: 'mx-3 my-2 bg-white border border-[#e6ebf1] rounded-lg overflow-hidden' }, lineas.map(function (l) { return renderCaducadaRow(l); })));
+    }
+
+    return VEVA.dom.el('div', { class: 'bg-[#fafbff] border border-[#e6ebf1] rounded-lg overflow-hidden pb-1' }, [header].concat(bodyChildren));
+  }
+
+  function renderRechazadaRow(l) {
+    var esperando = !!l.reactivacionSolicitada;
+    var accion;
+    if (esperando && !esTesoreria()) {
+      accion = VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] italic' }, ['Reactivacion solicitada — esperando confirmacion de Tesoreria']);
+    } else {
+      accion = VEVA.dom.el('button', { class: 'px-2.5 py-1 bg-[#635bff] text-white rounded text-[11px] font-semibold flex-shrink-0', onClick: function () { solicitarReactivacion(l); } }, [esperando ? 'Confirmar reactivacion' : 'Solicitar reactivacion']);
+    }
+    return VEVA.dom.el('div', { class: 'flex items-center justify-between gap-3 px-3 py-2 border-b border-[#f6f9fc] last:border-b-0' }, [
+      VEVA.dom.el('div', { class: 'min-w-0' }, [
+        VEVA.dom.el('div', { class: 'text-[12px] font-semibold' }, [l.proveedor + ' · ' + fmtMontoDivisa(l.monto, l.moneda)]),
+        VEVA.dom.el('div', { class: 'text-[11px] text-[#697386]' }, ['Rechazada en ' + faseLabel(l.fase) + (l.comentario ? ' · ' + l.comentario : '')])
+      ]),
+      accion
+    ]);
+  }
+
+  function renderCaducadaRow(l) {
+    return VEVA.dom.el('div', { class: 'flex items-center justify-between gap-3 px-3 py-2 border-b border-[#f6f9fc] last:border-b-0' }, [
+      VEVA.dom.el('div', { class: 'min-w-0' }, [
+        VEVA.dom.el('div', { class: 'text-[12px] font-semibold' }, [l.proveedor + ' · ' + fmtMontoDivisa(l.monto, l.moneda)]),
+        VEVA.dom.el('div', { class: 'text-[11px] text-[#697386]' }, ['Caducada en ' + faseLabel(l.fase)])
+      ]),
+      VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2] italic flex-shrink-0' }, ['No reactivable'])
+    ]);
+  }
+
+  // ---- Render: nodo Sociedad (nivel 1) ----
+  function renderSociedadNode(soc, props, tab) {
+    var expanded = !!state.expandedSoc[soc];
+    var counts = contarPropYProv(tab, soc);
+    // Punto 4/5: total por sociedad (todas las lineas de sus propuestas,
+    // mismo alcance que los chips de propuesta) + gran total con TC --
+    // una sola fuente de verdad, reutilizada aqui a nivel sociedad.
+    var todasLineasSoc = props.reduce(function (acc, p) { return acc.concat(p.lineas); }, []);
+    // Mismo hallazgo/fix que chipsProp arriba: montoEfectivo, no l.monto crudo.
+    var chipsSoc = totalesPorDivisa(todasLineasSoc.map(function (l) { return { moneda: l.moneda, monto: montoEfectivo(l) }; }));
+    var granTotalSoc = granTotalConTc(chipsSoc);
+
+    var header = VEVA.dom.el('div', {
+      class: 'flex items-center justify-between px-3.5 py-2.5 cursor-pointer hover:bg-[#fafbff] bg-[#f6f9fc]',
+      onClick: function () { state.expandedSoc[soc] = !expanded; redraw(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 min-w-0' }, [
+        VEVA.icon(expanded ? 'chevron-down' : 'chevron-right', 13, 'text-[#697386]'),
+        VEVA.dom.el('span', { class: 'text-[13.5px] font-bold flex-shrink-0' }, [soc]),
+        VEVA.dom.el('span', { class: 'font-mono text-[10.5px] text-[#697386] truncate' }, [counts.propuestas + ' propuesta(s) · ' + counts.proveedores + ' proveedor(es) aqui']),
+      ]),
+      VEVA.dom.el('span', { class: 'font-mono text-[12px] font-bold text-[#5851e5] flex-shrink-0' }, ['≈ MXN ' + fmtMonto(granTotalSoc)])
+    ]);
+    var body = null;
+    if (expanded) {
+      var bodyParts = [];
+      if (chipsSoc.length) {
+        bodyParts.push(VEVA.dom.el('div', { class: 'flex flex-wrap gap-1.5 px-2 pb-1' }, chipsSoc.map(function (t) {
+          var esSinMoneda = t.moneda === 'SIN_MONEDA';
+          return VEVA.dom.el('span', { class: 'font-mono text-[10px] rounded px-1.5 py-0.5 border ' + (esSinMoneda ? 'bg-red-50 border-red-200 text-red-700' : 'bg-white border-[#e6ebf1] text-[#697386]') }, [(esSinMoneda ? '⚠ Sin moneda' : t.moneda) + ' ' + fmtMonto(t.total)]);
+        })));
+      }
+      bodyParts.push(VEVA.dom.el('div', { class: 'flex flex-col gap-2 p-2 pt-0' }, props.map(function (p) { return renderPropuestaNode(p, tab); })));
+      body = VEVA.dom.el('div', {}, bodyParts);
+    }
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden' }, [header, body]);
+  }
+
+  // ---- Render: tarjetas resumen por sociedad (encabezado del tablero) ----
+  function renderSocCards() {
+    var socs = uniq(state.propuestas.map(function (p) { return p.sociedad; })).sort();
+    var cards = socs.map(function (name) {
+      var counts = PHASES.map(function (ph) {
+        var n = contarPropYProv(ph.id, name).proveedores;
+        return VEVA.dom.el('span', { class: 'text-[10px] px-1.5 py-0.5 rounded bg-[#f6f9fc] text-[#424770]' }, [ph.label.split(' ')[0].slice(0, 4) + '. ' + n]);
+      });
+      var active = name === state.selectedSociedad;
+      return VEVA.dom.el('div', {
+        class: 'cursor-pointer flex-shrink-0 w-[190px] bg-white rounded-lg p-3 shadow-sm border ' + (active ? 'border-[#635bff]' : 'border-transparent') + ' hover:shadow-md transition-all',
+        onClick: function () { state.selectedSociedad = state.selectedSociedad === name ? null : name; redraw(); }
+      }, [
+        VEVA.dom.el('div', { class: 'text-[13px] font-bold mb-0.5' }, [name]),
+        VEVA.dom.el('div', { class: 'text-[11px] text-[#697386] mb-2' }, [state.propuestas.filter(function (p) { return p.sociedad === name; }).length + ' propuestas']),
+        VEVA.dom.el('div', { class: 'flex gap-1 flex-wrap' }, counts)
+      ]);
+    });
+    return VEVA.dom.el('div', {}, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-widest mb-2.5' }, ['Tablero por sociedad — proveedores pendientes por fase']),
+      VEVA.dom.el('div', { class: 'flex gap-3 overflow-x-auto pb-2' }, cards)
+    ]);
+  }
+
+  function renderFilterChip() {
+    if (!state.selectedSociedad) return null;
+    return VEVA.dom.el('div', {
+      class: 'inline-flex items-center gap-1.5 cursor-pointer text-[12px] bg-[#635bff]/10 text-[#5851e5] px-3 py-1 rounded-full font-semibold',
+      onClick: function () { state.selectedSociedad = null; redraw(); }
+    }, ['Sociedad: ' + state.selectedSociedad + ' ✕']);
+  }
+
+  function renderTabs() {
+    function tabEl(id, label, extraClass) {
+      var counts = contarPropYProv(id, state.selectedSociedad);
+      var active = id === state.activeTab;
+      return VEVA.dom.el('div', {
+        class: 'cursor-pointer px-4 py-2.5 text-[13px] font-semibold border-b-2 ' + (active ? 'text-[#0a2540] border-[#635bff]' : 'text-[#697386] border-transparent hover:text-[#0a2540]') + ' ' + (extraClass || ''),
+        onClick: function () { state.activeTab = id; redraw(); }
+      }, [label + ' ', VEVA.dom.el('span', { class: 'opacity-60 font-normal font-mono text-[11px]' }, ['(' + counts.propuestas + '·' + counts.proveedores + ')'])]);
+    }
+    var tabs = PHASES.map(function (ph) { return tabEl(ph.id, ph.label); });
+    tabs.push(VEVA.dom.el('div', { class: 'flex-shrink-0 border-l border-[#e6ebf1] mx-1' }, []));
+    ESTADO_TABS.forEach(function (t) { tabs.push(tabEl(t.id, t.label, 'text-red-500/70')); });
+    tabs.push(VEVA.dom.el('div', { class: 'flex-shrink-0 border-l border-[#e6ebf1] mx-1' }, []));
+    tabs.push(tabEspecialEl('conciliacion', 'Conciliación', conciliacionPendientesCount()));
+    tabs.push(tabEspecialEl('comprobantes', 'Comprobantes', null));
+    return VEVA.dom.el('div', { class: 'flex gap-2 flex-wrap items-stretch border-b border-[#e6ebf1]' }, tabs);
+  }
+
+  /** Cuantas partidas siguen sin conciliar/sin cuenta -- badge de aviso en
+   * la pestaña (null si aun no se ha cargado el tablero de conciliacion,
+   * para no mostrar "0" enganoso antes de la primera carga). */
+  function conciliacionPendientesCount() {
+    if (!state.conciliacionData) return null;
+    var n = state.conciliacionData.partidas.filter(function (p) { return p.estadoConciliacion === 'pendiente' || p.estadoConciliacion === 'sin_cuenta'; }).length;
+    return n > 0 ? n : null;
+  }
+
+  /** Pestañas de Conciliacion/Comprobantes: no participan del filtro
+   * Sociedad->Propuesta->Proveedor de fase (lineasEnFiltro/contarPropYProv
+   * no aplican), asi que llevan su propio tab minimo en vez de tabEl. */
+  function tabEspecialEl(id, label, badgeCount) {
+    var active = id === state.activeTab;
+    return VEVA.dom.el('div', {
+      class: 'cursor-pointer px-4 py-2.5 text-[13px] font-semibold border-b-2 ' + (active ? 'text-[#0a2540] border-[#635bff]' : 'text-[#697386] border-transparent hover:text-[#0a2540]'),
+      onClick: function () {
+        state.activeTab = id;
+        if (id === 'conciliacion' && !state.conciliacionData) cargarConciliacion();
+        if (id === 'comprobantes' && !state.comprobantesData) cargarComprobantes();
+        redraw();
+      }
+    }, [label + ' ', badgeCount ? VEVA.dom.el('span', { class: 'ml-1 text-[10px] font-bold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full' }, [String(badgeCount)]) : null].filter(Boolean));
+  }
+
+  /** Punto 5 de la retroalimentacion: resumen condensado y SIEMPRE
+   * visible (sticky, no solo hasta el fondo de la pantalla) de lo que se
+   * lleva seleccionado en la pestana activa, cruzando todas las
+   * sociedades/propuestas -- no solo dentro de una propuesta abierta. */
+  function renderResumenSeleccion() {
+    var tab = state.activeTab;
+    var seleccionadas = [];
+    state.propuestas.forEach(function (p) { lineasEnFiltro(p, tab).forEach(function (l) { if (l.checked) seleccionadas.push(l); }); });
+    if (!seleccionadas.length) return null;
+    var texto = resumenChipsTexto(seleccionadas, montoEfectivo);
+    return VEVA.dom.el('div', { class: 'sticky top-0 z-10 bg-[#0a2540] text-white rounded-lg px-4 py-2 flex items-center justify-between shadow-md text-[12.5px]' }, [
+      VEVA.dom.el('span', {}, [VEVA.dom.el('b', {}, [String(seleccionadas.length)]), ' línea(s) seleccionada(s) en "' + tabLabel(tab) + '" · ' + texto]),
+      VEVA.dom.el('button', { class: 'text-[11px] underline opacity-80 hover:opacity-100 flex-shrink-0', onClick: function () { limpiarSeleccion(seleccionadas); } }, ['Limpiar selección'])
+    ]);
+  }
+
+  function renderGroups() {
+    var tab = state.activeTab;
+    var relevant = state.propuestas.filter(function (p) { return (!state.selectedSociedad || p.sociedad === state.selectedSociedad) && lineasEnFiltro(p, tab).length > 0; });
+    if (!relevant.length) {
+      return VEVA.dom.el('div', { class: 'text-center py-16 text-[13px] text-[#697386]' }, ['No hay propuestas en esta vista' + (state.selectedSociedad ? ' para ' + state.selectedSociedad : '') + '.']);
+    }
+    var bySoc = {}, socOrder = [];
+    relevant.forEach(function (p) { if (!bySoc[p.sociedad]) { bySoc[p.sociedad] = []; socOrder.push(p.sociedad); } bySoc[p.sociedad].push(p); });
+    return VEVA.dom.el('div', { class: 'flex flex-col gap-2.5' }, socOrder.sort().map(function (soc) { return renderSociedadNode(soc, bySoc[soc], tab); }));
+  }
+
+  // ---- Render: panel de carga de propuesta ----
+  function renderCargaToggle() {
+    if (!puedeCargar()) return null;
+    return VEVA.dom.el('button', {
+      class: 'px-3 py-1.5 border border-[#635bff] text-[#635bff] rounded-lg text-[12px] font-bold hover:bg-[#635bff]/5 flex items-center gap-1.5',
+      onClick: function () { state.cargaAbierta = !state.cargaAbierta; redraw(); }
+    }, [VEVA.icon('upload-cloud', 14), 'Cargar propuesta']);
+  }
+
+  function renderCargaLineaRow(g, l) {
+    var excluida = !!state.cargaExcluidos[l.tempId];
+    var cb = VEVA.dom.el('input', { type: 'checkbox' }, []);
+    cb.checked = !excluida;
+    cb.addEventListener('change', function (e) {
+      if (e.target.checked) delete state.cargaExcluidos[l.tempId]; else state.cargaExcluidos[l.tempId] = true;
+      redraw();
+    });
+    return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc] text-[12px]' + (excluida ? ' opacity-40' : ''), style: 'grid-template-columns:22px 70px 1.1fr 90px 1fr 110px 90px' }, [
+      cb,
+      VEVA.dom.el('span', { class: 'font-mono text-[10px] text-[#8792a2] truncate' }, [l.numeroProveedor ? String(l.numeroProveedor) : '—']),
+      VEVA.dom.el('span', { class: 'truncate' }, [l.proveedor || '—']),
+      VEVA.dom.el('span', { class: 'truncate text-[#697386] text-[11px]' }, [l.referencia ? String(l.referencia) : '—']),
+      VEVA.dom.el('span', { class: 'truncate text-[#697386]' }, [l.solicitante || '—']),
+      VEVA.dom.el('span', { class: 'text-right font-mono' }, [fmtMontoDivisa(l.monto, l.moneda)]),
+      l.duplicado ? VEVA.dom.el('span', { class: 'text-[10px] font-bold text-amber-600 text-right' }, ['⚠ Duplicado']) : VEVA.dom.el('span', {}, [])
+    ]);
+  }
+
+  /** Busca personas en el directorio de la organizacion (Bloque E,
+   * 2026-07-27) para el CC extraordinario de UNA propuesta puntual del
+   * preview de carga. Debounce de 350ms (no golpear la API con cada
+   * tecla), minimo 3 caracteres (mismo minimo que ya exige el backend).
+   * El estado transitorio de busqueda vive directo en `g` (prefijo `_`
+   * para distinguirlo de datos reales de la propuesta, mismo criterio
+   * que `state.cargaExcluidos` usa aparte para las lineas). */
+  function ccExtraBuscar(g, query) {
+    g._ccQuery = query;
+    if (g._ccDebounceTimer) clearTimeout(g._ccDebounceTimer);
+    if (query.trim().length < 3) { g._ccResultados = []; g._ccBuscando = false; g._ccError = null; redraw(); return; }
+    g._ccBuscando = true; g._ccError = null;
+    g._ccDebounceTimer = setTimeout(function () {
+      VEVA.gas('buscarContactosDirectorio', { query: query.trim() })
+        .then(function (res) {
+          if (res && res.status === 'success') { g._ccResultados = res.data; } else { g._ccResultados = []; g._ccError = (res && res.message) || 'Error al buscar.'; }
+        })
+        .catch(function (e) { g._ccResultados = []; g._ccError = String(e.message || e); })
+        .finally(function () { g._ccBuscando = false; redraw(); });
+    }, 350);
+  }
+
+  function ccExtraAgregar(g, persona) {
+    var yaEsta = (g.ccExtra || []).some(function (c) { return c.email === persona.email; });
+    if (!yaEsta) g.ccExtra = (g.ccExtra || []).concat([{ email: persona.email, nombre: persona.nombre }]);
+    g._ccQuery = ''; g._ccResultados = [];
+    redraw();
+  }
+
+  function ccExtraQuitar(g, email) {
+    g.ccExtra = (g.ccExtra || []).filter(function (c) { return c.email !== email; });
+    redraw();
+  }
+
+  /** CC extraordinario de esta propuesta puntual (opcional, poco comun) --
+   * dura solo mientras dure el seguimiento de ESTA propuesta, no es la
+   * lista estandar por sociedad (esa vive en "Lista de Distribucion",
+   * seccion CC de Pagos). Buscador contra el directorio de la
+   * organizacion, no contactos personales (decision explicita del
+   * usuario, requiere el permiso nuevo de directorio). */
+  function renderCcExtraGrupo(g) {
+    var chips = (g.ccExtra || []).map(function (c) {
+      return VEVA.dom.el('span', { class: 'inline-flex items-center gap-1 text-[10.5px] font-semibold bg-[#635bff]/10 text-[#635bff] px-2 py-0.5 rounded-full' }, [
+        c.nombre || c.email,
+        VEVA.dom.el('button', { class: 'hover:text-red-500', onClick: function () { ccExtraQuitar(g, c.email); } }, [VEVA.icon('x', 10)])
+      ]);
+    });
+
+    var input = VEVA.dom.el('input', {
+      type: 'text', placeholder: 'Buscar en el directorio (nombre o correo)…',
+      'data-focus-key': 'ccextra-' + g.sociedad,
+      class: 'w-full text-[11px] border border-[#e6ebf1] rounded px-2 py-1 outline-none focus:border-[#635bff]'
+    }, []);
+    input.value = g._ccQuery || '';
+    input.addEventListener('input', function (e) { ccExtraBuscar(g, e.target.value); });
+
+    var mostrarDropdown = g._ccQuery && g._ccQuery.trim().length >= 3;
+    var dropdown = null;
+    if (mostrarDropdown) {
+      var opciones;
+      if (g._ccBuscando) {
+        opciones = [VEVA.dom.el('div', { class: 'px-2 py-1.5 text-[11px] text-[#8792a2]' }, ['Buscando…'])];
+      } else if ((g._ccResultados || []).length) {
+        opciones = g._ccResultados.map(function (p) {
+          return VEVA.dom.el('div', {
+            class: 'px-2 py-1 text-[11px] hover:bg-[#f6f9fc] cursor-pointer flex items-center justify-between gap-2',
+            onClick: function () { ccExtraAgregar(g, p); }
+          }, [
+            VEVA.dom.el('span', { class: 'truncate' }, [p.nombre || p.email]),
+            VEVA.dom.el('span', { class: 'text-[#8792a2] font-mono text-[10px] flex-shrink-0' }, [p.email])
+          ]);
+        });
+      } else {
+        opciones = [VEVA.dom.el('div', { class: 'px-2 py-1.5 text-[11px] text-[#8792a2] italic' }, [g._ccError || 'Sin resultados.'])];
+      }
+      dropdown = VEVA.dom.el('div', { class: 'border border-[#e6ebf1] rounded-lg bg-white shadow-sm max-h-[140px] overflow-y-auto' }, opciones);
+    }
+
+    return VEVA.dom.el('div', { class: 'px-3 py-2 border-t border-[#f6f9fc] bg-[#fafbff] space-y-1.5' }, [
+      VEVA.dom.el('p', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Copiar a alguien más (opcional, solo para esta propuesta)']),
+      chips.length ? VEVA.dom.el('div', { class: 'flex flex-wrap gap-1.5' }, chips) : null,
+      input,
+      dropdown
+    ].filter(Boolean));
+  }
+
+  function renderCargaGrupo(g) {
+    var incluidas = g.lineas.filter(function (l) { return !state.cargaExcluidos[l.tempId]; }).length;
+    return VEVA.dom.el('div', { class: 'border border-[#e6ebf1] rounded-lg overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-3 py-2 bg-[#f6f9fc] flex justify-between items-center' }, [
+        VEVA.dom.el('span', { class: 'text-[12px] font-bold' }, ['Nueva propuesta — ' + g.sociedad]),
+        VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] font-mono' }, [incluidas + ' de ' + g.lineas.length + ' líneas'])
+      ]),
+      VEVA.dom.el('div', { class: 'max-h-[220px] overflow-y-auto' }, g.lineas.map(function (l) { return renderCargaLineaRow(g, l); })),
+      renderCcExtraGrupo(g)
+    ]);
+  }
+
+  function renderCargaPanel() {
+    if (!state.cargaAbierta) return null;
+
+    var children = [
+      VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Sube el Excel real de la propuesta (hoja "PROPUESTA CONSOLIDADA"). Se previsualiza antes de crear nada — puedes desmarcar líneas antes de confirmar.'])
+    ];
+
+    if (!state.cargaSheets) {
+      var input = VEVA.dom.el('input', { type: 'file', accept: '.xlsx,.xls', class: 'hidden' }, []);
+      input.addEventListener('change', function (e) { cargaSeleccionarArchivo(e.target.files[0]); });
+      var zone = VEVA.dom.el('div', {
+        class: 'border-2 border-dashed rounded-xl p-6 text-center cursor-pointer ' + (state.cargaDragging ? 'border-[#635bff] bg-[#635bff]/5' : 'border-[#e6ebf1] hover:border-[#635bff]/50'),
+        onClick: function () { input.click(); }
+      }, [VEVA.icon('upload-cloud', 26, 'text-[#635bff] mx-auto mb-1.5'), VEVA.dom.el('p', { class: 'text-[12.5px] font-bold' }, ['Arrastra el .xlsx o haz click para seleccionar'])]);
+      zone.addEventListener('dragover', function (e) { e.preventDefault(); state.cargaDragging = true; redraw(); });
+      zone.addEventListener('dragleave', function () { state.cargaDragging = false; redraw(); });
+      zone.addEventListener('drop', function (e) { e.preventDefault(); state.cargaDragging = false; redraw(); cargaSeleccionarArchivo(e.dataTransfer.files[0]); });
+      zone.appendChild(input);
+      children.push(zone);
+    } else if (!state.cargaPreview) {
+      children.push(VEVA.dom.el('div', { class: 'flex items-center justify-between bg-[#f6f9fc] border border-[#e6ebf1] rounded-lg px-3 py-2' }, [
+        VEVA.dom.el('span', { class: 'text-[12.5px] font-semibold flex items-center gap-1.5' }, [VEVA.icon('table-2', 14, 'text-[#697386]'), state.cargaArchivoNombre]),
+        VEVA.dom.el('div', { class: 'flex gap-2' }, [
+          // Sin este boton, un error que nunca llega a generar preview
+          // (ej. hoja/columnas no reconocidas) dejaba la pantalla
+          // "estacionada" sin forma de elegir otro archivo -- habia que
+          // refrescar la pagina. Mismo reset que el Cancelar de la rama
+          // con preview, mas abajo en esta misma funcion.
+          VEVA.dom.el('button', {
+            class: 'px-3 py-1.5 border border-[#e6ebf1] rounded text-[12px] font-semibold',
+            onClick: cargaCancelar
+          }, ['Cancelar']),
+          VEVA.dom.el('button', {
+            class: 'px-3 py-1.5 bg-[#635bff] text-white rounded text-[12px] font-bold flex items-center gap-1.5 disabled:opacity-50',
+            onClick: cargaPrevisualizar, disabled: state.cargaProcesando ? 'disabled' : null
+          }, [state.cargaProcesando ? VEVA.icon('loader', 12, 'animate-spin') : null, state.cargaProcesando ? 'Leyendo...' : 'Previsualizar'])
+        ])
+      ]));
+    } else {
+      var pv = state.cargaPreview;
+      children.push(VEVA.dom.el('p', { class: 'text-[11.5px] text-[#697386]' }, ['Hoja "' + pv.hoja + '": ' + pv.totalFilasValidas + ' línea(s) válida(s)' + (pv.filasOmitidasSubtotal ? ', ' + pv.filasOmitidasSubtotal + ' fila(s) de subtotal omitidas' : '') + '.']));
+      if (pv.erroresFila && pv.erroresFila.length) {
+        children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 rounded-lg p-3 space-y-0.5' }, [
+          VEVA.dom.el('p', { class: 'text-[11px] font-bold text-red-700 uppercase tracking-wide' }, [pv.erroresFila.length + ' fila(s) con error — no se importarán']),
+        ].concat(pv.erroresFila.map(function (e) { return VEVA.dom.el('p', { class: 'text-[11px] text-red-700' }, ['Fila ' + e.fila + ': ' + e.motivo]); }))));
+      }
+      children.push(VEVA.dom.el('div', { class: 'flex flex-col gap-2' }, pv.propuestasPreview.map(renderCargaGrupo)));
+
+      // Pieza 2 (2026-07-28, pedido explicito del usuario): si quedan
+      // lineas con UUID ya cargado antes SIN excluir, no se bloquea en
+      // automatico -- se le pide a la MISMA persona que carga que
+      // confirme explicitamente con un motivo obligatorio (override
+      // auditable, valida tambien en el servidor). Excluir la linea con
+      // el checkbox de siempre sigue funcionando igual, sin pasar por
+      // aqui.
+      var duplicadosPend = cargaDuplicadosPendientes();
+      if (duplicadosPend) {
+        var motivoInput = VEVA.dom.el('textarea', {
+          'data-focus-key': 'carga-motivo-forzado',
+          class: 'w-full h-16 border border-amber-300 rounded px-2 py-1.5 text-[12px] outline-none focus:border-[#635bff]',
+          placeholder: 'Motivo obligatorio para forzar la carga (ej. "se resube la propuesta de Ventura, la primera carga fue incompleta")...'
+        }, []);
+        motivoInput.value = state.cargaMotivoForzado || '';
+        motivoInput.addEventListener('input', function (e) { state.cargaMotivoForzado = e.target.value; redraw(); });
+        children.push(VEVA.dom.el('div', { class: 'bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2' }, [
+          VEVA.dom.el('p', { class: 'text-[11.5px] font-bold text-amber-800' }, ['⚠ ' + duplicadosPend + ' línea(s) con UUID ya cargado antes, sin excluir.']),
+          VEVA.dom.el('p', { class: 'text-[11px] text-amber-800' }, ['Exclúyelas con el checkbox de cada línea si fue un error, o captura el motivo para cargarlas de todas formas — queda registrado quién y cuándo forzó la carga.']),
+          motivoInput
+        ]));
+      }
+
+      children.push(VEVA.dom.el('div', { class: 'flex justify-end gap-2' }, [
+        VEVA.dom.el('button', { class: 'px-3 py-1.5 border border-[#e6ebf1] rounded text-[12px] font-semibold', onClick: cargaCancelar }, ['Cancelar']),
+        VEVA.dom.el('button', {
+          class: 'px-4 py-1.5 bg-[#635bff] text-white rounded text-[12px] font-bold disabled:opacity-50 flex items-center gap-1.5',
+          onClick: cargaConfirmar, disabled: (state.cargaProcesando || (duplicadosPend && !(state.cargaMotivoForzado || '').trim())) ? 'disabled' : null
+        }, [state.cargaProcesando ? VEVA.icon('loader', 12, 'animate-spin') : null, state.cargaProcesando ? 'Creando...' : 'Confirmar carga'])
+      ]));
+    }
+
+    if (state.cargaError) children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-3 rounded-lg text-[12px] text-red-700' }, [state.cargaError]));
+    if (state.cargaResultado) {
+      children.push(VEVA.dom.el('div', { class: 'bg-emerald-50 border border-emerald-100 p-3 rounded-lg text-[12px] text-emerald-700' }, [state.cargaResultado.message]));
+    }
+
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-4 space-y-3' }, children);
+  }
+
+  // ---- Render: pestaña Conciliacion (fase 6) ----
+  // Drill-down Sociedad -> Banco/Cuenta -> Conciliadas/No-conciliadas (2
+  // secciones), gate de saldo como badge informativo junto al banco (NO
+  // bloqueante). Match por partida: 1:1 o split 1:N (N:1 fuera de
+  // alcance, ver seccion 3.3 del prompt).
+  function agruparConciliacion(partidas) {
+    var bySoc = {}, socOrder = [];
+    partidas.forEach(function (p) {
+      if (!bySoc[p.sociedad]) { bySoc[p.sociedad] = { porCuenta: {}, ordenCuentas: [] }; socOrder.push(p.sociedad); }
+      var s = bySoc[p.sociedad];
+      var key = p.cuentaPago || '(sin cuenta)';
+      if (!s.porCuenta[key]) { s.porCuenta[key] = { cuenta: p.cuentaPago, banco: p.banco, partidas: [] }; s.ordenCuentas.push(key); }
+      s.porCuenta[key].partidas.push(p);
+    });
+    return socOrder.sort().map(function (soc) {
+      var s = bySoc[soc];
+      return { sociedad: soc, cuentas: s.ordenCuentas.map(function (k) { return s.porCuenta[k]; }) };
+    });
+  }
+
+  function renderConciliacionTab() {
+    if (state.conciliacionLoading || !state.conciliacionData) {
+      return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'), VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Cargando conciliación...'])]);
+    }
+    var partidas = state.conciliacionData.partidas || [];
+    var saldoPorCuenta = state.conciliacionData.saldoPorCuenta || {};
+    var grupos = agruparConciliacion(partidas);
+
+    var header = VEVA.dom.el('div', { class: 'flex items-center justify-between mb-3' }, [
+      VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Match por partida contra HIST_MOVIMIENTOS. El saldo cuadrado/no-cuadrado es informativo, no bloquea conciliar.']),
+      VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] font-bold hover:border-[#635bff]', onClick: cargarConciliacion }, [VEVA.icon('refresh-cw', 12), 'Actualizar'])
+    ]);
+
+    if (!grupos.length) {
+      return VEVA.dom.el('div', {}, [header, VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay partidas con pagos aplicados todavía.'])]);
+    }
+    return VEVA.dom.el('div', {}, [header].concat(grupos.map(function (g) { return renderConciliacionSociedad(g, saldoPorCuenta); })));
+  }
+
+  function renderConciliacionSociedad(g, saldoPorCuenta) {
+    var key = 'soc:' + g.sociedad;
+    var expanded = state.conciliacionExpanded[key] !== false;
+    var pendientesTotal = g.cuentas.reduce(function (s, c) { return s + c.partidas.filter(function (p) { return p.estadoConciliacion === 'pendiente' || p.estadoConciliacion === 'sin_cuenta'; }).length; }, 0);
+    var header = VEVA.dom.el('div', {
+      class: 'flex items-center justify-between px-3.5 py-2.5 cursor-pointer hover:bg-[#fafbff] bg-[#f6f9fc]',
+      onClick: function () { state.conciliacionExpanded[key] = !expanded; redraw(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [VEVA.icon(expanded ? 'chevron-down' : 'chevron-right', 13, 'text-[#697386]'), VEVA.dom.el('span', { class: 'text-[13.5px] font-bold' }, [g.sociedad])]),
+      pendientesTotal > 0
+        ? VEVA.dom.el('span', { class: 'text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-700' }, [pendientesTotal + ' pendiente' + (pendientesTotal === 1 ? '' : 's')])
+        : VEVA.dom.el('span', { class: 'text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700' }, ['Todo conciliado'])
+    ]);
+    var body = expanded ? VEVA.dom.el('div', { class: 'p-2 space-y-2' }, g.cuentas.map(function (c) { return renderConciliacionCuenta(g.sociedad, c, saldoPorCuenta); })) : null;
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden mb-2.5' }, [header, body].filter(Boolean));
+  }
+
+  function renderConciliacionCuenta(sociedad, c, saldoPorCuenta) {
+    var key = 'cta:' + sociedad + '|' + c.cuenta;
+    var expanded = state.conciliacionExpanded[key] !== false;
+    var saldo = c.cuenta ? saldoPorCuenta[c.cuenta] : null;
+    var pendientes = c.partidas.filter(function (p) { return p.estadoConciliacion === 'pendiente' || p.estadoConciliacion === 'sin_cuenta'; });
+    var conciliadas = c.partidas.filter(function (p) { return p.estadoConciliacion === 'conciliada' || p.estadoConciliacion === 'split'; });
+
+    var saldoBadge = null;
+    if (saldo) {
+      var dif = saldo.saldoFinalCalc - saldo.saldoReportado;
+      var ok = Math.abs(dif) < 1;
+      // Hallazgo real de auditoria (2026-07-28): VEVA.fmt.mxn redondea a
+      // pesos enteros (maximumFractionDigits:0), incoherente con la
+      // tolerancia real de negocio de esta pantalla (<$1) -- una
+      // diferencia real de $1.20 se veia como "$1", pareciendo un bug.
+      // Se usa fmtMonto (2 decimales) en su lugar -- este saldo es
+      // siempre en MXN (reporte bancario de SUM_MOV), no lleva etiqueta
+      // de moneda a proposito.
+      saldoBadge = VEVA.dom.el('span', {
+        class: 'text-[10.5px] font-bold px-2 py-0.5 rounded-full ' + (ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'),
+        title: 'Calculado ' + fmtMonto(saldo.saldoFinalCalc) + ' vs reportado ' + fmtMonto(saldo.saldoReportado) + ' (' + saldo.periodo + ')'
+      }, [ok ? '✓ Saldo cuadra' : ('Δ ' + fmtMonto(Math.abs(dif)))]);
+    }
+
+    var header = VEVA.dom.el('div', {
+      class: 'flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#f6f9fc] border border-[#e6ebf1] rounded-lg',
+      onClick: function () { state.conciliacionExpanded[key] = !expanded; redraw(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        VEVA.icon(expanded ? 'chevron-down' : 'chevron-right', 12, 'text-[#697386]'),
+        c.banco ? VEVA.dom.bankBadge(c.banco) : null,
+        VEVA.dom.el('span', { class: 'text-[12.5px] font-semibold' }, [c.cuenta ? ('•••' + String(c.cuenta).slice(-4)) : 'Sin cuenta de pago capturada'])
+      ].filter(Boolean)),
+      saldoBadge
+    ].filter(Boolean));
+
+    if (!expanded) return header;
+
+    var seccionPend = VEVA.dom.el('div', { class: 'mt-1.5' }, [
+      VEVA.dom.el('div', { class: 'text-[10px] font-bold uppercase tracking-wide text-amber-700 px-1 mb-1' }, ['No conciliadas (' + pendientes.length + ')']),
+      pendientes.length ? VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-lg overflow-hidden' }, pendientes.map(renderConciliacionPartidaRow)) : VEVA.dom.el('div', { class: 'text-[11px] text-[#8792a2] italic px-2 pb-2' }, ['Sin partidas pendientes en esta cuenta.'])
+    ]);
+    var seccionConc = VEVA.dom.el('div', { class: 'mt-2' }, [
+      VEVA.dom.el('div', { class: 'text-[10px] font-bold uppercase tracking-wide text-emerald-700 px-1 mb-1' }, ['Conciliadas (' + conciliadas.length + ')']),
+      conciliadas.length ? VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-lg overflow-hidden' }, conciliadas.map(renderConciliacionPartidaRow)) : VEVA.dom.el('div', { class: 'text-[11px] text-[#8792a2] italic px-2 pb-2' }, ['Ninguna todavía.'])
+    ]);
+
+    return VEVA.dom.el('div', {}, [header, seccionPend, seccionConc]);
+  }
+
+  var CONCILIACION_ROW_STYLE = 'grid-template-columns:1.3fr 90px 90px 105px 130px 70px';
+  var CONCILIACION_ESTADO_PILL = {
+    pendiente: { bg: 'bg-amber-100', text: 'text-amber-700', label: 'Sin conciliar' },
+    sin_cuenta: { bg: 'bg-red-50', text: 'text-red-600', label: 'Sin cuenta capturada' },
+    conciliada: { bg: 'bg-emerald-100', text: 'text-emerald-700', label: '1:1' }
+  };
+  function estadoPillConciliacion(p) {
+    if (p.estadoConciliacion === 'split') return { bg: 'bg-[#635bff]/10', text: 'text-[#635bff]', label: 'Split 1:' + p.vinculos.length };
+    return CONCILIACION_ESTADO_PILL[p.estadoConciliacion] || CONCILIACION_ESTADO_PILL.pendiente;
+  }
+
+  function renderConciliacionPartidaRow(p) {
+    var open = !!state.conciliacionMatchOpen[p.id];
+    var pill = estadoPillConciliacion(p);
+    var puedeAbrir = p.estadoConciliacion !== 'sin_cuenta';
+
+    var row = VEVA.dom.el('div', {
+      class: 'grid gap-2 items-center px-3 py-2 border-b border-[#f6f9fc] last:border-0' + (puedeAbrir ? ' cursor-pointer hover:bg-[#fafbff]' : ''),
+      style: CONCILIACION_ROW_STYLE,
+      onClick: puedeAbrir ? function () {
+        var nowOpen = !open;
+        state.conciliacionMatchOpen[p.id] = nowOpen;
+        if (nowOpen) cargarCandidatos(p.id);
+        redraw();
+      } : null
+    }, [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('div', { class: 'text-[12px] font-semibold' }, [p.proveedor]),
+        VEVA.dom.el('div', { class: 'text-[10.5px] text-[#8792a2]' }, [p.folio])
+      ]),
+      VEVA.dom.el('span', { class: 'text-[11px] font-mono text-[#697386]' }, [p.aplicadoFecha ? String(p.aplicadoFecha).slice(0, 10) : '—']),
+      VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, [p.monedaPagoReal && p.monedaPagoReal !== p.moneda ? (p.moneda + '→' + p.monedaPagoReal) : p.moneda]),
+      // Hallazgo real del revisor (Bloque B): p.montoEfectivo ahora es el
+      // ACUMULADO vigente, no el total final de la partida -- mostrarlo
+      // solo podia leerse como "el monto de la factura" cuando en
+      // realidad es "lo aplicado hasta ahora". Si todavia falta por
+      // aplicar (montoEfectivo < montoEfectivoTotal), se muestra
+      // "$X de $Y" -- mismo patron ya usado en renderCeldasAplicado.
+      // Hallazgo real de auditoria (2026-07-28): VEVA.fmt.mxn redondeaba
+      // a pesos enteros Y etiquetaba como MXN un monto que en realidad
+      // esta en monedaPagoReal||moneda (_montoEfectivoPartida convierte a
+      // esa moneda destino, no siempre MXN) -- se usa fmtMontoDivisa con
+      // la moneda real para no asumir MXN en silencio.
+      VEVA.dom.el('span', { class: 'text-right text-[12px] font-mono font-semibold' },
+        [(p.montoEfectivoTotal != null && p.montoEfectivo < p.montoEfectivoTotal)
+          ? (fmtMontoDivisa(p.montoEfectivo, p.monedaPagoReal || p.moneda) + ' de ' + fmtMontoDivisa(p.montoEfectivoTotal, p.monedaPagoReal || p.moneda))
+          : fmtMontoDivisa(p.montoEfectivo, p.monedaPagoReal || p.moneda)]),
+      VEVA.dom.el('span', { class: 'text-[10.5px] font-bold px-2 py-0.5 rounded-full text-center ' + pill.bg + ' ' + pill.text }, [pill.label]),
+      VEVA.dom.el('span', { class: 'text-[11px] font-bold text-[#635bff] text-right' }, [!puedeAbrir ? '' : (open ? 'Cerrar' : 'Ver')])
+    ]);
+
+    if (!open) return row;
+    return VEVA.dom.el('div', {}, [row, renderMatchPanel(p)]);
+  }
+
+  function renderMatchPanel(p) {
+    var loading = state.conciliacionCandidatosLoading[p.id];
+    var data = state.conciliacionCandidatos[p.id];
+    if (loading || !data) {
+      return VEVA.dom.el('div', { class: 'px-3 pb-3 pl-8 text-[11px] text-[#697386] italic' }, ['Buscando movimientos candidatos...']);
+    }
+    if (data.error) {
+      return VEVA.dom.el('div', { class: 'px-3 pb-3 pl-8 text-[11px] text-red-600' }, [data.error]);
+    }
+    var sel = state.conciliacionSeleccion[p.id] || {};
+    var candidatos = data.candidatos || [];
+
+    function toggleCand(c, checked) {
+      var s = state.conciliacionSeleccion[p.id] || {};
+      if (checked) s[c.idMov] = c.montoAplicadoActual || c.monto; else delete s[c.idMov];
+      state.conciliacionSeleccion[p.id] = s;
+      redraw();
+    }
+
+    var puedeEditar = puedeConciliarComprobantes();
+    var rows = candidatos.length
+      ? candidatos.map(function (c) {
+        var checked = sel[c.idMov] !== undefined;
+        var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: puedeEditar ? null : 'disabled' }, []);
+        cb.checked = checked;
+        if (puedeEditar) cb.addEventListener('change', function (e) { toggleCand(c, e.target.checked); });
+        return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc] last:border-0 text-[11px]' + (checked ? ' bg-[#635bff]/5' : ''), style: 'grid-template-columns:20px 80px 1fr 60px 110px' }, [
+          cb,
+          VEVA.dom.el('span', { class: 'font-mono text-[#697386]' }, [c.fecha.slice(5)]),
+          VEVA.dom.el('span', { class: 'truncate' }, [c.descripcion]),
+          VEVA.dom.el('span', { class: 'font-mono text-[10px] text-[#8792a2]' }, [c.moneda]),
+          VEVA.dom.el('span', { class: 'text-right font-mono font-semibold' }, [fmtMontoDivisa(c.monto, c.moneda)])
+        ]);
+      })
+      : [VEVA.dom.el('div', { class: 'text-[11px] text-[#8792a2] italic px-2.5 py-2' }, ['Sin candidatos con la tolerancia configurada (±' + (data.tolerancia ? data.tolerancia.toleranciaMontoPct : 2) + '% / ±' + (data.tolerancia ? data.tolerancia.toleranciaDias : 2) + ' días). Ajustable en la hoja CONFIG_CONCILIACION.'])];
+
+    var suma = Object.keys(sel).reduce(function (s, k) { return s + (Number(sel[k]) || 0); }, 0);
+    var objetivo = data.montoBuscado != null ? data.montoBuscado : p.montoEfectivo;
+    var monedaObjetivo = data.monedaBuscada || p.monedaPagoReal || p.moneda;
+    var dif = objetivo - suma;
+    var ok = Math.abs(dif) < 1;
+
+    // Hallazgo real de auditoria (2026-07-28): VEVA.fmt.mxn redondeaba a
+    // pesos enteros con etiqueta MXN fija, incoherente con la tolerancia
+    // real (<$1) y con partidas en moneda extranjera -- se usa
+    // fmtMontoDivisa con monedaObjetivo (los candidatos ya se filtran a
+    // la misma moneda del objetivo, ver buscarCandidatosMovimiento).
+    var summary = VEVA.dom.el('div', { class: 'flex items-center justify-between px-2.5 py-2 mt-1 bg-white border border-[#e6ebf1] rounded-lg' }, [
+      VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, ['Objetivo ' + fmtMontoDivisa(objetivo, monedaObjetivo) + ' · Seleccionado ' + fmtMontoDivisa(suma, monedaObjetivo)]),
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        VEVA.dom.el('span', { class: 'text-[11px] font-bold ' + (ok ? 'text-emerald-700' : 'text-red-600') }, [ok ? 'Diferencia $0.00 ✓' : ('Diferencia ' + fmtMontoDivisa(Math.abs(dif), monedaObjetivo))]),
+        (puedeEditar && Object.keys(sel).length) ? VEVA.dom.el('button', {
+          class: 'px-3 py-1 bg-[#635bff] text-white rounded text-[11px] font-bold disabled:opacity-40',
+          disabled: !ok ? 'disabled' : null,
+          onClick: function () { conciliar(p, sel); }
+        }, ['Conciliar']) : null
+      ].filter(Boolean))
+    ]);
+
+    return VEVA.dom.el('div', { class: 'px-3 pb-3 pl-8' }, [VEVA.dom.el('div', { class: 'bg-[#fafbff] border border-[#e6ebf1] rounded-lg overflow-hidden' }, rows), summary]);
+  }
+
+  // ---- Render: pestaña Comprobantes (fase 7) ----
+  // Tabla plana Fecha/Sociedad/Proveedor-Concepto/Importe/Comprobante,
+  // independiente de conciliacion a proposito. Seleccion multiple + "1
+  // archivo consolidado" para el caso real (PDF del banco con resumen +
+  // varios pagos individuales adentro).
+  function renderComprobantesTab() {
+    if (state.comprobantesLoading || !state.comprobantesData) {
+      return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'), VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Cargando comprobantes...'])]);
+    }
+    var partidas = state.comprobantesData;
+    var seleccionadas = partidas.filter(function (p) { return state.comprobantesSeleccion[p.id]; });
+
+    var header = VEVA.dom.el('div', { class: 'flex items-center justify-between mb-3' }, [
+      VEVA.dom.el('p', { class: 'text-[12px] text-[#697386]' }, ['Independiente de conciliación — se puede subir el comprobante sin esperar a identificar el movimiento bancario.']),
+      VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] font-bold hover:border-[#635bff]', onClick: cargarComprobantes }, [VEVA.icon('refresh-cw', 12), 'Actualizar'])
+    ]);
+
+    if (!partidas.length) {
+      return VEVA.dom.el('div', {}, [header, VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay partidas con pagos aplicados todavía.'])]);
+    }
+
+    var table = VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden' }, [renderComprobantesHead()].concat(partidas.map(renderComprobantePartidaRow)));
+
+    var bulkBar = null;
+    if (seleccionadas.length && puedeConciliarComprobantes()) {
+      bulkBar = VEVA.dom.el('div', { class: 'flex items-center justify-between mt-2 px-3 py-2 bg-[#635bff]/5 border border-[#635bff]/20 rounded-lg text-[12px]' }, [
+        VEVA.dom.el('span', {}, [seleccionadas.length + ' partida(s) seleccionada(s)']),
+        VEVA.dom.el('button', { class: 'px-3 py-1.5 bg-[#635bff] text-white rounded text-[11px] font-bold', onClick: function () { abrirSelectorArchivo(seleccionadas.map(function (p) { return p.id; })); } }, ['Adjuntar 1 archivo consolidado a la selección'])
+      ]);
+    }
+
+    return VEVA.dom.el('div', {}, [header, table, bulkBar].filter(Boolean));
+  }
+
+  function renderComprobantesHead() {
+    return VEVA.dom.el('div', { class: 'grid gap-2 px-3 py-1.5 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: 'grid-template-columns:20px 70px 110px 1.4fr 100px 1.2fr' }, ['', 'Fecha', 'Sociedad', 'Proveedor / Concepto', 'Importe', 'Comprobante']);
+  }
+
+  function renderComprobantePartidaRow(p) {
+    var puedeEditar = puedeConciliarComprobantes();
+    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: puedeEditar ? null : 'disabled' }, []);
+    cb.checked = !!state.comprobantesSeleccion[p.id];
+    if (puedeEditar) cb.addEventListener('change', function (e) { state.comprobantesSeleccion[p.id] = e.target.checked; redraw(); });
+
+    var compCell;
+    if (p.comprobantes.length) {
+      compCell = VEVA.dom.el('div', { class: 'flex flex-wrap gap-1' }, p.comprobantes.map(function (c) {
+        return VEVA.dom.el('span', {
+          class: 'inline-flex items-center gap-1 text-[10.5px] bg-emerald-50 text-emerald-700 border border-emerald-100 rounded px-2 py-0.5 cursor-pointer',
+          onClick: function () {
+            var key = p.id + '|' + c.comprobanteId;
+            state.comprobantesPanelAbierto = state.comprobantesPanelAbierto === key ? null : key;
+            redraw();
+          }
+        }, ['📄 ' + c.archivoNombre + (c.totalPartidas > 1 ? ' · ' + c.totalPartidas + ' pagos' : '')]);
+      }));
+    } else {
+      compCell = VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2]' }, ['Sin comprobante']);
+    }
+
+    var row = VEVA.dom.el('div', { class: 'grid gap-2 items-center px-3 py-2 border-b border-[#f6f9fc] last:border-0', style: 'grid-template-columns:20px 70px 110px 1.4fr 100px 1.2fr' }, [
+      cb,
+      VEVA.dom.el('span', { class: 'text-[11px] font-mono text-[#697386]' }, [p.aplicadoFecha ? String(p.aplicadoFecha).slice(0, 10) : '—']),
+      VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, [p.sociedad]),
+      VEVA.dom.el('div', {}, [VEVA.dom.el('div', { class: 'text-[12px] font-semibold' }, [p.proveedor]), VEVA.dom.el('div', { class: 'text-[10.5px] text-[#8792a2] truncate' }, [p.desc || ''])]),
+      VEVA.dom.el('span', { class: 'text-right text-[12px] font-mono font-semibold' }, [fmtMontoDivisa(p.monto, p.moneda)]),
+      compCell
+    ]);
+
+    var panels = p.comprobantes.filter(function (c) { return state.comprobantesPanelAbierto === (p.id + '|' + c.comprobanteId); }).map(function (c) {
+      return VEVA.dom.el('div', { class: 'px-3 pb-2 pl-8 text-[11px] text-[#697386]' }, [
+        VEVA.dom.el('div', { class: 'flex items-center justify-between bg-[#fafbff] border border-[#e6ebf1] rounded-lg px-2.5 py-1.5' }, [
+          VEVA.dom.el('a', { href: c.driveUrl, target: '_blank', class: 'text-[#635bff] font-semibold hover:underline' }, [c.archivoNombre + (c.totalPartidas > 1 ? ' (' + c.totalPartidas + ' pagos)' : '')]),
+          puedeEditar ? VEVA.dom.el('button', { class: 'text-red-600 font-bold text-[10.5px]', onClick: function () { desvincular(c.comprobanteId, p.id); } }, ['Quitar de esta partida']) : null
+        ])
+      ]);
+    });
+
+    return panels.length ? VEVA.dom.el('div', {}, [row].concat(panels)) : row;
+  }
+
+  function _redrawInner() {
+    var root = document.getElementById('view-pagos-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    // Bloque 2 (2026-07-26): acceso bloqueado -- se corta aqui, antes de
+    // cualquier otro render que asuma state.usuario/state.propuestas ya
+    // cargados (ej. renderCargaToggle usa puedeCargar(), que leeria un
+    // usuario nulo).
+    if (state.sinAcceso) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center space-y-3 max-w-lg mx-auto mt-10' }, [
+        VEVA.icon('shield', 32, 'text-[#e6ebf1] mx-auto'),
+        VEVA.dom.el('p', { class: 'text-[15px] font-bold text-[#0a2540]' }, ['Sin acceso a Propuestas de Pago']),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386]' }, [state.sinAccesoMensaje || 'Tu cuenta no está registrada con un rol activo en CAT_USUARIOS.']),
+        VEVA.dom.el('button', { class: 'px-4 py-1.5 bg-[#635bff] text-white rounded-lg text-[12px] font-bold', onClick: cargar }, ['Reintentar'])
+      ]));
+      return;
+    }
+
+    var cargaBtn = renderCargaToggle();
+    root.appendChild(VEVA.dom.el('div', { class: 'flex items-start justify-between gap-3' }, [
+      VEVA.dom.el('div', {}, [
+        VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Propuestas de Pago']),
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['Workflow de aprobacion por fases — contabilidad, tesoreria, liberacion, banca, aplicado'])
+      ]),
+      cargaBtn
+    ].filter(Boolean)));
+
+    var cargaPanel = renderCargaPanel();
+    if (cargaPanel) root.appendChild(cargaPanel);
+
+    if (state.error) root.appendChild(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl text-[13px] text-red-700' }, [state.error]));
+
+    if (state.loading) {
+      root.appendChild(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'), VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Cargando propuestas...'])]));
+      return;
+    }
+
+    var esTabEspecial = state.activeTab === 'conciliacion' || state.activeTab === 'comprobantes';
+    if (!esTabEspecial) root.appendChild(renderSocCards());
+    var chip = renderFilterChip();
+    if (chip && !esTabEspecial) root.appendChild(chip);
+    root.appendChild(renderTabs());
+
+    if (state.activeTab === 'conciliacion') { root.appendChild(renderConciliacionTab()); return; }
+    if (state.activeTab === 'comprobantes') { root.appendChild(renderComprobantesTab()); return; }
+
+    var resumenSel = renderResumenSeleccion();
+    if (resumenSel) root.appendChild(resumenSel);
+    root.appendChild(renderGroups());
+  }
+
+  /** Bug real corregido 2026-07-26: `_redrawInner` reconstruye TODO el
+   * DOM (patron sin virtual DOM de toda la app) -- cualquier <input> con
+   * foco se destruye y se vuelve a crear en cada tecla, perdiendo el
+   * foco/cursor/scroll. Confirmado que este es el UNICO lugar de las 15
+   * vistas de TESO donde un handler de "input" llama redraw() de forma
+   * sincrona (el resto solo muta `state` sin redibujar en cada tecla).
+   * Fix generico y local a este archivo: envolver `_redrawInner` para
+   * capturar que campo tenia el foco (via `data-focus-key`, no un id
+   * fijo -- las filas se recrean con las mismas keys logicas aunque el
+   * nodo DOM sea nuevo), su seleccion de texto, y el scroll del panel
+   * principal, y restaurarlos despues de reconstruir. No se toca
+   * Shared_Core.html (compartido con las otras 14 vistas). */
+  function redraw() {
+    var mainScroll = document.getElementById('veva-main');
+    var scrollTop = mainScroll ? mainScroll.scrollTop : 0;
+    var activo = document.activeElement;
+    var focusKey = null, selStart = null, selEnd = null;
+    if (activo && activo.hasAttribute && activo.hasAttribute('data-focus-key')) {
+      focusKey = activo.getAttribute('data-focus-key');
+      if (typeof activo.selectionStart === 'number') { selStart = activo.selectionStart; selEnd = activo.selectionEnd; }
+    }
+
+    _redrawInner();
+
+    if (focusKey) {
+      var el = document.querySelector('[data-focus-key="' + focusKey + '"]');
+      if (el) {
+        el.focus();
+        if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selEnd); } catch (e) { } }
+      }
+    }
+    if (mainScroll) mainScroll.scrollTop = scrollTop;
+  }
+
+  VEVA.registerView('workflow-pagos', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-pagos-root', class: 'space-y-5' }, []));
+      cargar();
+    },
+    destroy: function () { /* sin listeners globales que limpiar en esta vista */ }
+  });
+})();
+</script>

@@ -1,0 +1,593 @@
+<script>
+/**
+ * VEVA - Vista: Carga de Saldos y Movimientos.
+ * Responsabilidad unica: subir archivos bancarios (CSV/TXT/XLS/XLSX),
+ * previsualizar, guardar en historial, y las acciones de auditoria/
+ * sincronizacion/limpieza asociadas. Puerto directo de CargaSaldos
+ * (_source/Index.jsx:712).
+ *
+ * Backends citados (todos verificados contra backend/Codigo.gs):
+ *   previsualizarSaldos            (Codigo.gs:432)
+ *   guardarSaldosEnHistorial       (Codigo.gs:501)
+ *   previsualizarMovimientos       (Codigo.gs:1782)
+ *   cargarMovimientos              (Codigo.gs:1837)
+ *   limpiarPeriodoMovimientos      (Codigo.gs:2002)
+ *   generarHojaAuditoria           (Codigo.gs:2941)
+ *   generarHojaAuditoriaCobranza   (Codigo.gs:3038)
+ *   sincronizarCobranzaHist        (Codigo.gs:2286)
+ *   sincronizarTransferenciasHist  (Codigo.gs:2344)
+ *
+ * Dependencia externa nueva (decidida con el usuario): SheetJS via CDN,
+ * agregada en Index.html, para parsear .xlsx/.xls en el navegador antes
+ * de mandarlos al backend como CSV. Es la unica libreria externa de todo
+ * el proyecto -- necesaria porque no hay forma nativa de leer binarios
+ * .xlsx en el navegador.
+ *
+ * Nota fiel al original: el icono 'trash-2' de los botones "Limpiar" no
+ * existe en VEVA.ICONS -- tampoco existia en el set de iconos del React
+ * original (_IP en _source/Index.jsx), asi que esos botones ya se veian
+ * sin icono en el prototipo. Se replica tal cual, no se inventa un path.
+ */
+(function () {
+  var BANCOS = ['Santander', 'Banorte', 'BBVA', 'Inbursa', 'Banamex'];
+
+  var state = {
+    archivos: [], procesando: false, preview: null, resultado: null, dragging: false, reemplazar: false,
+    archivosMov: [], draggingMov: false, procesandoMov: false, previewMov: null, resultadoMov: null, expandedSaldo: {},
+    auditLoading: false, auditResult: null,
+    auditCobLoad: false, auditCobRes: null,
+    sincCobLoad: false, sincCobRes: null,
+    sincTraspLoad: false, sincTraspRes: null,
+    limpDesde: '', limpHasta: '', limpLoading: false, limpRes: null
+  };
+
+  function readFileAsCSV(file) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      if (ext === 'xlsx' || ext === 'xls') {
+        reader.onload = function (e) {
+          try {
+            var wb = XLSX.read(e.target.result, { type: 'binary' });
+            resolve(XLSX.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]));
+          } catch (err) { reject(err); }
+        };
+        reader.onerror = reject;
+        reader.readAsBinaryString(file);
+      } else {
+        reader.onload = function (e) { resolve(e.target.result); };
+        reader.onerror = reject;
+        reader.readAsText(file, 'utf-8');
+      }
+    });
+  }
+
+  function readFileAsAllSheets(file) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      if (ext === 'xlsx' || ext === 'xls') {
+        reader.onload = function (e) {
+          try {
+            var wb = XLSX.read(e.target.result, { type: 'binary' });
+            resolve(wb.SheetNames.map(function (nombre) {
+              return { nombre: nombre, csv: XLSX.utils.sheet_to_csv(wb.Sheets[nombre], { dateNF: 'dd/mm/yyyy' }) };
+            }));
+          } catch (err) { reject(err); }
+        };
+        reader.onerror = reject;
+        reader.readAsBinaryString(file);
+      } else {
+        reader.onload = function (e) { resolve([{ nombre: file.name, csv: e.target.result }]); };
+        reader.onerror = reject;
+        reader.readAsText(file, 'utf-8');
+      }
+    });
+  }
+
+  function detectarTipo(nombre) {
+    var n = nombre.toUpperCase();
+    return (n.indexOf('MOV') >= 0 || n.indexOf('EDO') >= 0 || n.indexOf('ESTADO') >= 0) ? 'movimientos' : 'saldos';
+  }
+
+  function detectarBancoNombre(nombre) {
+    var n = nombre.toUpperCase();
+    if (n.indexOf('SANTANDER') >= 0) return 'Santander';
+    if (n.indexOf('BANORTE') >= 0) return 'Banorte';
+    if (n.indexOf('BBVA') >= 0) return 'BBVA';
+    if (n.indexOf('INBURSA') >= 0) return 'Inbursa';
+    if (n.indexOf('BANAMEX') >= 0) return 'Banamex';
+    return '';
+  }
+
+  function extraerFechaDeNombre(nombre) {
+    var m = nombre.match(/(\d{2})[_\-](\d{2})[_\-](\d{4})/);
+    if (m) return m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0');
+    m = nombre.match(/(\d{4})(\d{2})(\d{2})/);
+    if (m) return m[1] + '-' + m[2] + '-' + m[3];
+    return '';
+  }
+
+  // ---- Saldos: archivos, preview, guardar ----
+
+  function agregarArchivos(fileList) {
+    var files = Array.from(fileList).filter(function (f) { return ['csv', 'xlsx', 'xls', 'txt'].indexOf(f.name.split('.').pop().toLowerCase()) >= 0; });
+    Promise.all(files.map(function (file) {
+      return readFileAsCSV(file).then(function (csv) {
+        return { id: Date.now() + Math.random(), nombre: file.name, tipo: detectarTipo(file.name), banco: detectarBancoNombre(file.name), fecha: extraerFechaDeNombre(file.name), tc: '1', csv: csv, estado: 'pendiente' };
+      }).catch(function (e) {
+        return { id: Date.now() + Math.random(), nombre: file.name, tipo: 'saldos', banco: '', fecha: extraerFechaDeNombre(file.name), tc: '1', csv: null, estado: 'error', error: 'No se pudo leer: ' + e.message };
+      });
+    })).then(function (nuevos) {
+      state.archivos = state.archivos.concat(nuevos);
+      state.preview = null; state.resultado = null;
+      redraw();
+    });
+  }
+
+  function removeArchivo(id) { state.archivos = state.archivos.filter(function (a) { return a.id !== id; }); redraw(); }
+  function updateArchivo(id, upd) {
+    state.archivos = state.archivos.map(function (a) { return a.id === id ? Object.assign({}, a, upd) : a; });
+    redraw();
+  }
+
+  function toPayload(modo) {
+    return {
+      modo: modo || 'saltar',
+      archivos: state.archivos.filter(function (a) { return a.csv; }).map(function (a) {
+        return { nombre: a.nombre, contenido: a.csv, banco: a.banco, fecha: a.fecha, tc: a.tc, tipo: a.tipo };
+      })
+    };
+  }
+
+  function previsualizarHandler() {
+    if (!state.archivos.some(function (a) { return a.csv; })) return;
+    state.procesando = true; redraw();
+    VEVA.gas('previsualizarSaldos', toPayload())
+      .then(function (res) { if (res.status === 'success') state.preview = res.data; else state.resultado = res; })
+      .catch(function (e) { state.resultado = { status: 'error', message: e.message }; })
+      .finally(function () { state.procesando = false; redraw(); });
+  }
+
+  function guardarHandler() {
+    if (!state.archivos.some(function (a) { return a.csv; })) return;
+    state.procesando = true; redraw();
+    VEVA.gas('guardarSaldosEnHistorial', toPayload(state.reemplazar ? 'reemplazar' : 'saltar'))
+      .then(function (res) {
+        state.resultado = res;
+        if (res.status === 'success') { state.archivos = []; state.preview = null; state.reemplazar = false; }
+      })
+      .catch(function (e) { state.resultado = { status: 'error', message: e.message }; })
+      .finally(function () { state.procesando = false; redraw(); });
+  }
+
+  // ---- Movimientos: archivos, preview, guardar ----
+
+  function agregarArchivosMov(fileList) {
+    var files = Array.from(fileList).filter(function (f) { return ['csv', 'xlsx', 'xls', 'txt'].indexOf(f.name.split('.').pop().toLowerCase()) >= 0; });
+    Promise.all(files.map(function (file) {
+      return readFileAsAllSheets(file).then(function (sheets) {
+        return { id: Date.now() + Math.random(), nombre: file.name, banco: detectarBancoNombre(file.name), fecha: extraerFechaDeNombre(file.name), tc: '1', sheets: sheets, numHojas: sheets.length, estado: 'pendiente' };
+      }).catch(function (e) {
+        return { id: Date.now() + Math.random(), nombre: file.name, banco: '', fecha: '', tc: '1', sheets: [], numHojas: 0, estado: 'error', error: 'No se pudo leer: ' + e.message };
+      });
+    })).then(function (nuevos) {
+      state.archivosMov = state.archivosMov.concat(nuevos);
+      state.previewMov = null; state.resultadoMov = null;
+      redraw();
+    });
+  }
+
+  function removeArchivoMov(id) { state.archivosMov = state.archivosMov.filter(function (a) { return a.id !== id; }); redraw(); }
+  function updateArchivoMov(id, upd) {
+    state.archivosMov = state.archivosMov.map(function (a) { return a.id === id ? Object.assign({}, a, upd) : a; });
+    redraw();
+  }
+
+  function buildPayloadMov() {
+    return {
+      archivos: state.archivosMov.filter(function (a) { return a.estado !== 'error' && a.sheets && a.sheets.length > 0; })
+        .map(function (a) { return { nombre: a.nombre, banco: a.banco, sheets: a.sheets }; })
+    };
+  }
+
+  function previsualizarMovHandler() {
+    var payload = buildPayloadMov();
+    if (!payload.archivos.length) return;
+    state.procesandoMov = true; state.previewMov = null; state.resultadoMov = null; redraw();
+    VEVA.gas('previsualizarMovimientos', payload)
+      .then(function (res) {
+        if (res.status === 'success') state.previewMov = res.data;
+        else state.resultadoMov = { ok: false, msg: res.message };
+      })
+      .catch(function (e) { state.resultadoMov = { ok: false, msg: String(e) }; })
+      .finally(function () { state.procesandoMov = false; redraw(); });
+  }
+
+  function guardarMovHandler() {
+    var payload = buildPayloadMov();
+    if (!payload.archivos.length) return;
+    state.procesandoMov = true; state.previewMov = null; state.resultadoMov = null; redraw();
+    VEVA.gas('cargarMovimientos', payload)
+      .then(function (res) {
+        if (res.status === 'success') { state.resultadoMov = { ok: true, msg: res.message, data: res.data }; state.archivosMov = []; }
+        else state.resultadoMov = { ok: false, msg: res.message };
+      })
+      .catch(function (e) { state.resultadoMov = { ok: false, msg: String(e) }; })
+      .finally(function () { state.procesandoMov = false; redraw(); });
+  }
+
+  // ---- Auditoria / sincronizacion / limpieza ----
+
+  function runAdminAction(fnName, payload, loadingKey, resKey, msgOk) {
+    state[loadingKey] = true; state[resKey] = null; redraw();
+    VEVA.gas(fnName, payload)
+      .then(function (res) { state[resKey] = { ok: res.status === 'success', msg: res.message || msgOk }; })
+      .catch(function (e) { state[resKey] = { ok: false, msg: String(e) }; })
+      .finally(function () { state[loadingKey] = false; redraw(); });
+  }
+
+  function limpiarPeriodo() {
+    if (!state.limpDesde || !state.limpHasta) return;
+    var label = state.limpDesde === state.limpHasta ? state.limpDesde : state.limpDesde + ' a ' + state.limpHasta;
+    if (!confirm('Eliminar TODOS los movimientos de ' + label + ' de HIST y SUM_MOV?\nEsta accion no se puede deshacer.')) return;
+    runAdminAction('limpiarPeriodoMovimientos', { desde: state.limpDesde, hasta: state.limpHasta }, 'limpLoading', 'limpRes', 'Completado');
+  }
+
+  function limpiarTodoHist() {
+    if (!confirm('ELIMINAR TODO el historial de movimientos de HIST y SUM_MOV?\nEsta accion borra TODO y no se puede deshacer.')) return;
+    if (!confirm('Confirmacion final: borrar TODO HIST_MOVIMIENTOS y SUM_MOV por completo?')) return;
+    runAdminAction('limpiarPeriodoMovimientos', { todo: true }, 'limpLoading', 'limpRes', 'Completado');
+  }
+
+  // ---- Render: dropzone generico ----
+
+  function renderDropzone(opts) {
+    var zone = VEVA.dom.el('div', {
+      class: 'border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all ' +
+        (opts.dragging ? 'border-[#635bff] bg-[#635bff]/5' : 'border-[#e6ebf1] hover:border-[#635bff]/50 hover:bg-[#f6f9fc]'),
+      onClick: function () { input.click(); }
+    }, [
+      VEVA.dom.el('div', { class: 'flex justify-center mb-3' }, [VEVA.icon('upload-cloud', 36, opts.iconClass)]),
+      VEVA.dom.el('p', { class: 'text-[14px] font-bold text-[#0a2540]' }, [opts.titulo]),
+      VEVA.dom.el('p', { class: 'text-[12px] text-[#697386] mt-1' }, [opts.subtitulo])
+    ]);
+    var input = VEVA.dom.el('input', { type: 'file', multiple: 'multiple', accept: '.csv,.xlsx,.xls,.txt', class: 'hidden' }, []);
+    input.addEventListener('change', function (e) { opts.onFiles(e.target.files); });
+    zone.addEventListener('dragover', function (e) { e.preventDefault(); opts.onDragging(true); });
+    zone.addEventListener('dragleave', function () { opts.onDragging(false); });
+    zone.addEventListener('drop', function (e) { e.preventDefault(); opts.onDragging(false); opts.onFiles(e.dataTransfer.files); });
+    zone.appendChild(input);
+    return zone;
+  }
+
+  function selectEl(value, options, onChange, placeholder) {
+    var opts = (placeholder != null ? [{ v: '', l: placeholder }] : []).concat(options.map(function (o) { return { v: o, l: o }; }));
+    var sel = VEVA.dom.el('select', { class: 'text-[12px] border border-[#e6ebf1] rounded px-2 py-1 bg-white outline-none focus:border-[#635bff]' },
+      opts.map(function (o) { return VEVA.dom.el('option', { value: o.v }, [o.l]); }));
+    sel.value = value || '';
+    sel.addEventListener('change', function (e) { onChange(e.target.value); });
+    return sel;
+  }
+
+  // ---- Render: seccion Saldos ----
+
+  function renderFilaArchivo(a) {
+    var selTipo = selectEl(a.tipo, ['saldos', 'movimientos'], function (v) { updateArchivo(a.id, { tipo: v }); }, null);
+    selTipo.options[0].text = 'Saldos'; selTipo.options[1].text = 'Movimientos';
+    var selBanco = selectEl(a.banco, BANCOS, function (v) { updateArchivo(a.id, { banco: v }); }, 'Auto-detectar');
+    var inFecha = VEVA.dom.el('input', { type: 'date', class: 'text-[12px] border border-[#e6ebf1] rounded px-2 py-1 bg-white outline-none focus:border-[#635bff]' }, []);
+    inFecha.value = a.fecha; inFecha.addEventListener('change', function (e) { updateArchivo(a.id, { fecha: e.target.value }); });
+    var inTc = VEVA.dom.el('input', { type: 'number', step: '0.01', min: '1', class: 'text-[12px] border border-[#e6ebf1] rounded px-2 py-1 bg-white outline-none focus:border-[#635bff] w-20' }, []);
+    inTc.value = a.tc; inTc.addEventListener('change', function (e) { updateArchivo(a.id, { tc: e.target.value }); });
+
+    var nombreCol = VEVA.dom.el('td', { class: 'px-4 py-2' }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [
+        VEVA.icon(/\.xlsx?$/.test(a.nombre) ? 'table-2' : 'file-text', 14, 'text-[#697386] flex-shrink-0'),
+        VEVA.dom.el('span', { class: 'font-medium truncate max-w-[180px]' }, [a.nombre])
+      ])
+    ]);
+    if (a.error) nombreCol.appendChild(VEVA.dom.el('p', { class: 'text-[11px] text-red-600 mt-0.5 pl-5' }, [a.error]));
+
+    return VEVA.dom.el('tr', { class: a.estado === 'error' ? 'bg-red-50/50' : '' }, [
+      nombreCol,
+      VEVA.dom.el('td', { class: 'px-4 py-2' }, [selTipo]),
+      VEVA.dom.el('td', { class: 'px-4 py-2' }, [selBanco]),
+      VEVA.dom.el('td', { class: 'px-4 py-2' }, [inFecha]),
+      VEVA.dom.el('td', { class: 'px-4 py-2' }, [inTc]),
+      VEVA.dom.el('td', { class: 'px-2 py-2' }, [
+        VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { removeArchivo(a.id); } }, [VEVA.icon('x', 14)])
+      ])
+    ]);
+  }
+
+  function renderTablaSaldos() {
+    if (!state.archivos.length) return null;
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+      'Archivo', 'Tipo', 'Banco', 'Fecha', 'TC USD'
+    ].map(function (h) { return VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, [h]); }).concat([VEVA.dom.el('th', { class: 'px-2 py-2 w-8' }, [])]))]);
+    var tbody = VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, state.archivos.map(renderFilaArchivo));
+    var table = VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, tbody]);
+
+    var toggleReemplazar = VEVA.dom.el('input', { type: 'checkbox', class: 'w-4 h-4 accent-[#635bff] cursor-pointer' }, []);
+    toggleReemplazar.checked = state.reemplazar;
+    toggleReemplazar.addEventListener('change', function (e) { state.reemplazar = e.target.checked; redraw(); });
+
+    var footer = VEVA.dom.el('div', { class: 'px-6 py-4 border-t border-[#e6ebf1] flex justify-between items-center gap-3 bg-[#f6f9fc]/50' }, [
+      VEVA.dom.el('button', { class: 'text-[13px] text-[#697386] hover:text-red-500 transition-colors', onClick: function () { state.archivos = []; state.preview = null; state.resultado = null; state.reemplazar = false; redraw(); } }, ['Limpiar todo']),
+      VEVA.dom.el('div', { class: 'flex items-center gap-4' }, [
+        VEVA.dom.el('label', { class: 'flex items-center gap-2 cursor-pointer select-none' }, [toggleReemplazar, VEVA.dom.el('span', { class: 'text-[12px] font-medium ' + (state.reemplazar ? 'text-amber-600' : 'text-[#697386]') }, ['Reemplazar datos existentes'])]),
+        VEVA.dom.el('button', { class: 'px-4 py-2 border border-[#635bff] text-[#635bff] rounded-lg text-[13px] font-bold hover:bg-[#635bff]/5 transition-all disabled:opacity-50 flex items-center gap-1.5', onClick: previsualizarHandler, disabled: state.procesando ? 'disabled' : null }, [state.procesando ? VEVA.icon('loader', 13, 'animate-spin') : null, state.procesando ? 'Procesando...' : 'Previsualizar']),
+        VEVA.dom.el('button', {
+          class: 'px-6 py-2 text-white rounded-lg text-[13px] font-bold transition-all disabled:opacity-50 flex items-center gap-2 ' + (state.reemplazar ? 'bg-amber-500 hover:bg-amber-600' : 'bg-[#635bff] hover:bg-[#5851e5]'),
+          onClick: guardarHandler, disabled: (state.procesando || !state.archivos.some(function (a) { return a.csv; })) ? 'disabled' : null
+        }, [VEVA.icon(state.procesando ? 'loader' : (state.reemplazar ? 'refresh-cw' : 'save'), 14, state.procesando ? 'animate-spin' : ''), state.procesando ? (state.reemplazar ? 'Reemplazando...' : 'Guardando...') : (state.reemplazar ? 'Reemplazar en Historial' : 'Guardar en Historial')])
+      ])
+    ]);
+
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, [state.archivos.length + ' archivo' + (state.archivos.length > 1 ? 's' : '') + ' seleccionado' + (state.archivos.length > 1 ? 's' : '')])]),
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [table]),
+      footer
+    ]);
+  }
+
+  function renderPreviewSaldos() {
+    if (!state.preview) return null;
+    var total = state.preview.reduce(function (a, f) { return a + (f.registros ? f.registros.length : 0); }, 0);
+    var bloques = state.preview.map(function (f) {
+      var header = VEVA.dom.el('div', { class: 'px-5 py-3 flex justify-between items-center bg-[#f6f9fc]' }, [
+        VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [VEVA.icon(f.ok ? 'check-circle' : 'alert-circle', 14, f.ok ? 'text-emerald-500' : 'text-red-500'), VEVA.dom.el('p', { class: 'text-[13px] font-bold' }, [f.nombre])]),
+        VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, [f.ok ? f.registros.length + ' registros' : f.error])
+      ]);
+      var partes = [header];
+      if (f.ok && f.registros.length) partes.push(renderTablaRegistrosPreview(f.registros));
+      if (f.advertencias && f.advertencias.length) {
+        partes.push(VEVA.dom.el('div', { class: 'px-5 py-2 bg-amber-50 border-t border-amber-100' }, f.advertencias.map(function (w) { return VEVA.dom.el('p', { class: 'text-[11px] text-amber-700' }, [w]); })));
+      }
+      return VEVA.dom.el('div', { class: 'bg-white rounded-xl border shadow-sm overflow-hidden ' + (f.ok ? 'border-[#e6ebf1]' : 'border-red-200') }, partes);
+    });
+    return VEVA.dom.el('div', { class: 'space-y-3' }, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-widest flex items-center gap-2' }, [
+        VEVA.dom.el('span', { class: 'w-2 h-2 rounded-full bg-[#635bff] inline-block' }, []),
+        'Vista Previa — ' + total + ' registro' + (total !== 1 ? 's' : '') + ' detectado' + (total !== 1 ? 's' : '')
+      ])
+    ].concat(bloques));
+  }
+
+  function renderTablaRegistrosPreview(registros) {
+    var thead = VEVA.dom.el('thead', { class: 'border-b border-[#e6ebf1]' }, [VEVA.dom.el('tr', {}, ['Sociedad', 'Banco', 'Cuenta', 'Saldo', 'Tipo'].map(function (h) { return VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, [h]); }))]);
+    var rows = registros.map(function (r) {
+      var tipoCls = r.tipo === 'OPERATIVAS' ? 'bg-[#635bff]/10 text-[#635bff]' : r.tipo === 'CAPEX' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600';
+      return VEVA.dom.el('tr', { class: 'hover:bg-[#f6f9fc]/50' }, [
+        VEVA.dom.el('td', { class: 'px-4 py-2 text-[#0a2540] max-w-[200px] truncate' }, [r.sociedad]),
+        VEVA.dom.el('td', { class: 'px-4 py-2 text-[#697386]' }, [r.banco]),
+        VEVA.dom.el('td', { class: 'px-4 py-2 font-mono text-[#697386]' }, ['*' + String(r.cuenta).slice(-4)]),
+        VEVA.dom.el('td', { class: 'px-4 py-2 font-mono font-bold' }, [r.moneda + ' ' + r.saldo.toLocaleString('es-MX', { minimumFractionDigits: 2 })]),
+        VEVA.dom.el('td', { class: 'px-4 py-2' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold px-2 py-0.5 rounded-full ' + tipoCls }, [r.tipo])])
+      ]);
+    });
+    return VEVA.dom.el('table', { class: 'w-full text-[12px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, rows)]);
+  }
+
+  function renderResultadoSaldos() {
+    if (!state.resultado) return null;
+    var ok = state.resultado.status === 'success';
+    var msg = ok
+      ? state.resultado.data.guardados + ' registros guardados'
+        + (state.resultado.data.reemplazados > 0 ? ' — ' + state.resultado.data.reemplazados + ' filas reemplazadas' : '')
+        + (state.resultado.data.duplicados > 0 ? ' — ' + state.resultado.data.duplicados + ' duplicados omitidos' : '')
+        + (state.resultado.data.sinMapeo && state.resultado.data.sinMapeo.length ? ' — ' + state.resultado.data.sinMapeo.length + ' sin mapeo ignoradas' : '')
+      : state.resultado.message;
+    var body = [VEVA.dom.el('p', { class: 'text-[13px] font-bold ' + (ok ? 'text-emerald-700' : 'text-red-700') }, [msg])];
+    if (ok && state.resultado.data.sinMapeo && state.resultado.data.sinMapeo.length) {
+      body.push(VEVA.dom.el('p', { class: 'text-[11px] text-amber-700 mt-1' }, ['Cuentas sin mapeo en CAT_CUENTAS_MAPEO: ' + state.resultado.data.sinMapeo.map(function (s) { return s.cuenta; }).join(', ')]));
+    }
+    if (ok && state.resultado.data.errores && state.resultado.data.errores.length) {
+      body.push(VEVA.dom.el('ul', { class: 'mt-2 space-y-1' }, state.resultado.data.errores.map(function (e) { return VEVA.dom.el('li', { class: 'text-[12px] text-red-600' }, [e.archivo + ': ' + e.error]); })));
+    }
+    return VEVA.dom.el('div', { class: 'p-5 rounded-xl border flex items-start gap-3 ' + (ok ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100') }, [
+      VEVA.icon(ok ? 'check-circle' : 'alert-circle', 18, 'flex-shrink-0 mt-0.5 ' + (ok ? 'text-emerald-500' : 'text-red-500')),
+      VEVA.dom.el('div', {}, body)
+    ]);
+  }
+
+  // ---- Render: seccion Movimientos ----
+
+  function renderFilaArchivoMov(a) {
+    var selBanco = selectEl(a.banco, BANCOS, function (v) { updateArchivoMov(a.id, { banco: v }); }, 'Auto-detectar');
+    var nombreParts = [VEVA.icon(/\.xlsx?$/.test(a.nombre) ? 'table-2' : 'file-text', 14, 'text-[#697386] flex-shrink-0'), VEVA.dom.el('span', { class: 'font-medium truncate max-w-[200px]' }, [a.nombre])];
+    if (a.numHojas > 1) nombreParts.push(VEVA.dom.el('span', { class: 'text-[10px] bg-[#635bff]/10 text-[#635bff] px-1.5 py-0.5 rounded-full font-bold' }, [a.numHojas + ' hojas']));
+    var nombreCol = VEVA.dom.el('td', { class: 'px-4 py-2' }, [VEVA.dom.el('div', { class: 'flex items-center gap-2' }, nombreParts)]);
+    if (a.error) nombreCol.appendChild(VEVA.dom.el('p', { class: 'text-[11px] text-red-600 mt-0.5 pl-5' }, [a.error]));
+    return VEVA.dom.el('tr', { class: a.estado === 'error' ? 'bg-red-50' : '' }, [
+      nombreCol,
+      VEVA.dom.el('td', { class: 'px-4 py-2' }, [selBanco]),
+      VEVA.dom.el('td', { class: 'px-2 py-2' }, [VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { removeArchivoMov(a.id); } }, [VEVA.icon('x', 14)])])
+    ]);
+  }
+
+  function renderTablaMov() {
+    if (!state.archivosMov.length) return null;
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+      VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Archivo']),
+      VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Banco']),
+      VEVA.dom.el('th', { class: 'px-4 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider w-8' }, [])
+    ])]);
+    var table = VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, state.archivosMov.map(renderFilaArchivoMov))]);
+    var footer = VEVA.dom.el('div', { class: 'px-6 py-4 border-t border-[#e6ebf1] flex justify-between items-center gap-3 bg-[#f6f9fc]/50' }, [
+      VEVA.dom.el('button', { class: 'text-[13px] text-[#697386] hover:text-red-500 transition-colors', onClick: function () { state.archivosMov = []; state.previewMov = null; state.resultadoMov = null; redraw(); } }, ['Limpiar todo']),
+      VEVA.dom.el('div', { class: 'flex items-center gap-3' }, [
+        VEVA.dom.el('button', { class: 'px-4 py-2 border border-[#e6ebf1] rounded-lg text-[13px] font-bold transition-colors flex items-center gap-1.5 ' + (state.procesandoMov ? 'opacity-50 text-[#697386]' : 'text-[#0a2540] hover:border-[#635bff] hover:text-[#635bff]'), onClick: previsualizarMovHandler, disabled: state.procesandoMov ? 'disabled' : null }, [state.procesandoMov ? VEVA.icon('loader', 13, 'animate-spin') : null, state.procesandoMov ? 'Procesando...' : 'Previsualizar']),
+        VEVA.dom.el('button', { class: 'px-6 py-2 rounded-lg text-[13px] font-bold flex items-center gap-2 transition-colors ' + (state.procesandoMov ? 'bg-[#635bff]/50 text-white' : 'bg-[#635bff] text-white hover:bg-[#5851e5]'), onClick: guardarMovHandler, disabled: state.procesandoMov ? 'disabled' : null }, [VEVA.icon(state.procesandoMov ? 'loader' : 'save', 14, state.procesandoMov ? 'animate-spin' : ''), state.procesandoMov ? 'Guardando...' : 'Guardar Movimientos'])
+      ])
+    ]);
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, [state.archivosMov.length + ' archivo' + (state.archivosMov.length > 1 ? 's' : '') + ' seleccionado' + (state.archivosMov.length > 1 ? 's' : '')])]),
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [table]),
+      footer
+    ]);
+  }
+
+  function renderDetalleSaldoFila(m) {
+    var hasSaldo = m.saldo !== null && m.saldo !== 0;
+    var dif = hasSaldo && m.saldoCalculado !== null ? Math.abs(m.saldoCalculado - m.saldo) : 0;
+    var ok = !hasSaldo || dif <= 0.02;
+    var estado = !hasSaldo ? '—' : ok ? VEVA.dom.el('span', { class: 'text-green-600 font-bold' }, ['OK']) : VEVA.dom.el('span', { class: 'text-red-500 font-bold' }, ['Δ' + dif.toLocaleString('es-MX', { maximumFractionDigits: 2 })]);
+    return VEVA.dom.el('tr', { class: ok ? '' : 'bg-red-50' }, [
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-[#697386] whitespace-nowrap' }, [m.fecha]),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-[#0a2540] max-w-[180px] truncate' }, [m.descripcion]),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-right text-red-600' }, [m.cargo > 0 ? m.cargo.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : '']),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-right text-emerald-600' }, [m.abono > 0 ? m.abono.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : '']),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-right text-[#697386]' }, [hasSaldo ? m.saldo.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : '—']),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-right font-medium text-[#0a2540]' }, [m.saldoCalculado !== null ? m.saldoCalculado.toLocaleString('es-MX', { maximumFractionDigits: 2 }) : '—']),
+      VEVA.dom.el('td', { class: 'px-2 py-1 border-b border-[#f0f0f0] text-center' }, [estado])
+    ]);
+  }
+
+  function renderPreviewMovItem(r, i) {
+    var head = VEVA.dom.el('div', { class: 'flex items-start justify-between gap-4' }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2' }, [VEVA.icon(r.success ? 'check-circle' : 'alert-circle', 14, r.success ? 'text-green-500' : 'text-red-500'), VEVA.dom.el('span', { class: 'text-[13px] font-bold text-[#0a2540] truncate max-w-[240px]' }, [r.nombre])])
+    ]);
+    if (r.success) {
+      var stats = [VEVA.dom.el('span', {}, [VEVA.dom.el('span', { class: 'font-bold text-[#0a2540]' }, [String(r.total)]), ' movimientos'])];
+      if (r.cobranza > 0) stats.push(VEVA.dom.el('span', {}, [VEVA.dom.el('span', { class: 'font-bold text-[#635bff]' }, [String(r.cobranza)]), ' cobranza']));
+      if (r.sinClasif > 0) stats.push(VEVA.dom.el('span', { class: 'text-amber-600' }, [VEVA.dom.el('span', { class: 'font-bold' }, [String(r.sinClasif)]), ' sin clasificar']));
+      if (r.saldoInicial) stats.push(VEVA.dom.el('span', {}, ['Saldo inicial: ', VEVA.dom.el('span', { class: 'font-bold' }, [String(r.saldoInicial)])]));
+      if (r.validadorSaldo && r.validadorSaldo.ok === true) stats.push(VEVA.dom.el('span', { class: 'text-green-600 font-bold' }, ['Saldo OK']));
+      if (r.validadorSaldo && r.validadorSaldo.ok === false) {
+        var dif = Math.abs(r.validadorSaldo.diferencia || 0);
+        stats.push(VEVA.dom.el('span', { class: 'text-red-500 font-bold' }, ['Dif. saldo: ' + dif.toLocaleString('es-MX', { maximumFractionDigits: 2 }) + (r.validadorSaldo.filasFallidas > 0 ? ' (' + r.validadorSaldo.filasFallidas + ' filas)' : '')]));
+      }
+      head.appendChild(VEVA.dom.el('div', { class: 'flex items-center gap-4 text-[12px] text-[#697386] flex-shrink-0' }, stats));
+    }
+    var partes = [head];
+    if (!r.success) partes.push(VEVA.dom.el('p', { class: 'text-[12px] text-red-600 mt-1 pl-5' }, [r.error]));
+    if (r.advertencias && r.advertencias.length) partes.push(VEVA.dom.el('ul', { class: 'mt-1 pl-5 space-y-0.5' }, r.advertencias.map(function (a) { return VEVA.dom.el('li', { class: 'text-[11px] text-amber-600' }, [a]); })));
+    if (r.success && r.movimientosSaldo && r.movimientosSaldo.length) {
+      var isOpen = !!state.expandedSaldo[i];
+      var toggleBtn = VEVA.dom.el('button', { class: 'text-[11px] text-[#635bff] hover:underline font-medium flex items-center gap-1', onClick: function () { state.expandedSaldo[i] = !isOpen; redraw(); } }, [
+        VEVA.icon(isOpen ? 'chevron-up' : 'chevron-down', 11), isOpen ? 'Ocultar detalle' : 'Ver detalle saldo fila a fila (' + r.movimientosSaldo.length + ' filas)'
+      ]);
+      var detalle = [VEVA.dom.el('div', { class: 'mt-2' }, [toggleBtn])];
+      if (isOpen) {
+        var thead = VEVA.dom.el('thead', { class: 'bg-[#f6f9fc] sticky top-0' }, [VEVA.dom.el('tr', {}, ['Fecha', 'Descripcion', 'Cargo', 'Abono', 'Saldo Rep.', 'Saldo Calc.', 'Estado'].map(function (h, hi) {
+          return VEVA.dom.el('th', { class: 'px-2 py-1.5 font-semibold border-b border-[#e6ebf1] text-[#697386] ' + (hi >= 2 && hi <= 5 ? 'text-right' : hi === 6 ? 'text-center' : 'text-left') }, [h]);
+        }))]);
+        var tbody = VEVA.dom.el('tbody', {}, r.movimientosSaldo.map(renderDetalleSaldoFila));
+        detalle.push(VEVA.dom.el('div', { class: 'mt-2 overflow-auto max-h-64 rounded border border-[#e6ebf1]' }, [VEVA.dom.el('table', { class: 'w-full text-[11px] border-collapse' }, [thead, tbody])]));
+      }
+      partes = partes.concat(detalle);
+    }
+    return VEVA.dom.el('div', { class: 'px-6 py-4 ' + (r.success ? '' : 'bg-red-50') }, partes);
+  }
+
+  function renderPreviewMov() {
+    if (!state.previewMov) return null;
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc] flex justify-between items-center' }, [
+        VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Vista previa de movimientos']),
+        VEVA.dom.el('button', { class: 'text-[#697386] hover:text-red-500', onClick: function () { state.previewMov = null; redraw(); } }, [VEVA.icon('x', 14)])
+      ]),
+      VEVA.dom.el('div', { class: 'divide-y divide-[#f6f9fc]' }, state.previewMov.map(renderPreviewMovItem))
+    ]);
+  }
+
+  function renderResultadoMov() {
+    if (!state.resultadoMov) return null;
+    var ok = state.resultadoMov.ok;
+    var body = [VEVA.dom.el('p', { class: 'text-[13px] font-bold ' + (ok ? 'text-green-800' : 'text-red-700') }, [state.resultadoMov.msg])];
+    if (ok && state.resultadoMov.data && state.resultadoMov.data.errores && state.resultadoMov.data.errores.length) {
+      body.push(VEVA.dom.el('ul', { class: 'mt-1 space-y-0.5' }, state.resultadoMov.data.errores.map(function (e) { return VEVA.dom.el('li', { class: 'text-[11px] text-red-600' }, [e.archivo + ': ' + e.error]); })));
+    }
+    return VEVA.dom.el('div', { class: 'rounded-xl px-5 py-4 flex items-start gap-3 ' + (ok ? 'bg-green-50 border border-green-100' : 'bg-red-50 border border-red-100') }, [
+      VEVA.icon(ok ? 'check-circle' : 'alert-circle', 16, 'flex-shrink-0 mt-0.5 ' + (ok ? 'text-green-600' : 'text-red-500')),
+      VEVA.dom.el('div', { class: 'min-w-0' }, body)
+    ]);
+  }
+
+  // ---- Render: auditoria / sync / limpieza ----
+
+  function renderAccionCard(cfg) {
+    var btn = VEVA.dom.el('button', {
+      class: 'flex items-center gap-1.5 px-3 py-1.5 text-white rounded-lg text-[12px] font-bold transition-all disabled:opacity-50 whitespace-nowrap ml-3 ' + cfg.btnClass,
+      onClick: cfg.onClick, disabled: state[cfg.loadingKey] ? 'disabled' : null
+    }, [VEVA.icon(state[cfg.loadingKey] ? 'loader' : cfg.icon, 12, state[cfg.loadingKey] ? 'animate-spin' : ''), state[cfg.loadingKey] ? cfg.loadingLabel : cfg.label]);
+    var partes = [VEVA.dom.el('div', { class: 'flex items-center justify-between' }, [
+      VEVA.dom.el('div', {}, [VEVA.dom.el('p', { class: 'text-[13px] font-bold text-[#1a1f36]' }, [cfg.titulo]), VEVA.dom.el('p', { class: 'text-[11px] text-[#697386] mt-0.5' }, [cfg.desc])]),
+      btn
+    ])];
+    var res = state[cfg.resKey];
+    if (res) partes.push(VEVA.dom.el('p', { class: 'mt-2 text-[12px] font-medium ' + (res.ok ? 'text-emerald-600' : 'text-red-500') }, [res.msg]));
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm p-4' }, partes);
+  }
+
+  function renderLimpiarCard() {
+    var inDesde = VEVA.dom.el('input', { type: 'month', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-red-400' }, []);
+    inDesde.value = state.limpDesde; inDesde.addEventListener('change', function (e) { state.limpDesde = e.target.value; state.limpRes = null; redraw(); });
+    var inHasta = VEVA.dom.el('input', { type: 'month', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-2 py-1.5 outline-none focus:border-red-400' }, []);
+    inHasta.value = state.limpHasta; inHasta.addEventListener('change', function (e) { state.limpHasta = e.target.value; state.limpRes = null; redraw(); });
+
+    var partes = [
+      VEVA.dom.el('div', { class: 'mb-2' }, [VEVA.dom.el('p', { class: 'text-[13px] font-bold text-red-700' }, ['Limpiar periodo']), VEVA.dom.el('p', { class: 'text-[11px] text-[#697386] mt-0.5' }, ['Elimina movimientos de HIST y SUM_MOV para recargar archivos YTD ya cargados'])]),
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 flex-wrap' }, [
+        VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, ['Desde']), inDesde,
+        VEVA.dom.el('span', { class: 'text-[11px] text-[#697386]' }, ['Hasta']), inHasta,
+        VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg text-[12px] font-bold hover:bg-red-700 transition-all disabled:opacity-50 whitespace-nowrap', onClick: limpiarPeriodo, disabled: (state.limpLoading || !state.limpDesde || !state.limpHasta) ? 'disabled' : null }, [VEVA.icon(state.limpLoading ? 'loader' : 'trash-2', 12, state.limpLoading ? 'animate-spin' : ''), state.limpLoading ? 'Limpiando...' : 'Limpiar rango']),
+        VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 bg-red-900 text-white rounded-lg text-[12px] font-bold hover:bg-red-800 transition-all disabled:opacity-50 whitespace-nowrap', onClick: limpiarTodoHist, disabled: state.limpLoading ? 'disabled' : null }, [VEVA.icon('trash-2', 12), 'Limpiar TODO HIST'])
+      ])
+    ];
+    if (state.limpRes) partes.push(VEVA.dom.el('p', { class: 'mt-2 text-[12px] font-medium ' + (state.limpRes.ok ? 'text-emerald-600' : 'text-red-500') }, [state.limpRes.msg]));
+    return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-red-200 shadow-sm p-4' }, partes);
+  }
+
+  function renderAcciones() {
+    var cards = [
+      renderAccionCard({ titulo: 'Auditoria Movimientos', desc: 'AUDITORIA_SUM — HIST vs SUM_MOV, todos los periodos 2026', icon: 'table-2', label: 'Generar', loadingLabel: 'Generando...', btnClass: 'bg-[#635bff] hover:bg-[#5851e5]', loadingKey: 'auditLoading', resKey: 'auditResult', onClick: function () { runAdminAction('generarHojaAuditoria', {}, 'auditLoading', 'auditResult'); } }),
+      renderAccionCard({ titulo: 'Auditoria Cobranza', desc: 'AUDITORIA_COBRANZA — ES_COBRANZA=SI en HIST vs SUM_MOV, todos los periodos 2026', icon: 'table-2', label: 'Generar', loadingLabel: 'Generando...', btnClass: 'bg-emerald-600 hover:bg-emerald-700', loadingKey: 'auditCobLoad', resKey: 'auditCobRes', onClick: function () { runAdminAction('generarHojaAuditoriaCobranza', {}, 'auditCobLoad', 'auditCobRes'); } }),
+      renderAccionCard({ titulo: 'Sincronizar ES_COBRANZA', desc: 'Corrige HIST: activa ES_COBRANZA=SI en INGRESOS clasificados COBRANZA u Operativos', icon: 'refresh-cw', label: 'Sincronizar', loadingLabel: 'Sincronizando...', btnClass: 'bg-amber-600 hover:bg-amber-700', loadingKey: 'sincCobLoad', resKey: 'sincCobRes', onClick: function () { runAdminAction('sincronizarCobranzaHist', undefined, 'sincCobLoad', 'sincCobRes'); } }),
+      renderAccionCard({ titulo: 'Sincronizar Traspasos', desc: 'Re-clasifica TRASPASOS_INTERNOS e INTERCIAS en todo HIST (scope completo)', icon: 'git-merge', label: 'Sincronizar', loadingLabel: 'Sincronizando...', btnClass: 'bg-indigo-600 hover:bg-indigo-700', loadingKey: 'sincTraspLoad', resKey: 'sincTraspRes', onClick: function () { runAdminAction('sincronizarTransferenciasHist', undefined, 'sincTraspLoad', 'sincTraspRes'); } }),
+      renderLimpiarCard()
+    ];
+    return VEVA.dom.el('div', { class: 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3' }, cards);
+  }
+
+  // ---- Redraw principal ----
+
+  function redraw() {
+    var root = document.getElementById('view-cargamov-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Carga de Saldos y Movimientos']),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5' }, ['CSV o XLSX — Santander, Banorte, BBVA, Inbursa, Banamex'])
+    ]));
+
+    root.appendChild(renderDropzone({ dragging: state.dragging, iconClass: 'text-[#635bff]', titulo: 'Arrastra los archivos aqui o haz click para seleccionar', subtitulo: 'CSV, XLSX — hasta 10 archivos por carga', onDragging: function (v) { state.dragging = v; redraw(); }, onFiles: agregarArchivos }));
+    var tablaSaldos = renderTablaSaldos(); if (tablaSaldos) root.appendChild(tablaSaldos);
+    var previewSaldos = renderPreviewSaldos(); if (previewSaldos) root.appendChild(previewSaldos);
+    var resultadoSaldos = renderResultadoSaldos(); if (resultadoSaldos) root.appendChild(resultadoSaldos);
+
+    root.appendChild(VEVA.dom.el('div', { class: 'relative flex items-center py-2' }, [
+      VEVA.dom.el('div', { class: 'flex-grow border-t border-[#e6ebf1]' }, []),
+      VEVA.dom.el('span', { class: 'mx-4 text-[11px] font-bold text-[#697386] uppercase tracking-widest whitespace-nowrap' }, ['Carga de Movimientos']),
+      VEVA.dom.el('div', { class: 'flex-grow border-t border-[#e6ebf1]' }, [])
+    ]));
+    root.appendChild(renderDropzone({ dragging: state.draggingMov, iconClass: 'text-[#697386]', titulo: 'Arrastra archivos de movimientos aqui o haz click', subtitulo: 'CSV, XLSX — estados de cuenta bancarios (todas las hojas)', onDragging: function (v) { state.draggingMov = v; redraw(); }, onFiles: agregarArchivosMov }));
+    var tablaMov = renderTablaMov(); if (tablaMov) root.appendChild(tablaMov);
+    var previewMov = renderPreviewMov(); if (previewMov) root.appendChild(previewMov);
+    var resultadoMov = renderResultadoMov(); if (resultadoMov) root.appendChild(resultadoMov);
+
+    root.appendChild(renderAcciones());
+  }
+
+  VEVA.registerView('carga-mov', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-cargamov-root', class: 'space-y-6' }, []));
+      redraw();
+    },
+    destroy: function () { /* sin listeners globales que limpiar en esta vista */ }
+  });
+})();
+</script>
