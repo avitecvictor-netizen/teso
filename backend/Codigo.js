@@ -671,6 +671,12 @@ function getHistorialPosicion(params) {
   }
 }
 
+// La funcion temporal diagnosticoCatCuentasSoccer (solo lectura, listaba
+// filas de CAT_CUENTAS_MAPEO conteniendo "soccer" para verificar el caso
+// real "Soccer Loco Holding" antes de escribir el fallback por nombre en
+// _resolverSociedadDesdeNombreEmpresa, Svc_Pagos.js) vivio aqui durante
+// esa investigacion y se retiro 2026-08-02 una vez revisado su log.
+
 // Las funciones temporales diagnosticoSaldosHoy (diagnostico de solo
 // lectura) y fixSaldoBanorte406605300 (correccion puntual del saldo mal
 // cargado el 2026-07-30 para la cuenta 406605300/Banorte, causado por el

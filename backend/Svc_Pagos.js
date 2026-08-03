@@ -1536,13 +1536,21 @@ function _esHojaPropuestaConsolidada(headerRow) {
   return set.indexOf('Nombre empresa') >= 0 && set.indexOf('Proveedor') >= 0 && set.indexOf('Importe MXN') >= 0;
 }
 
-/** Lee CAT_CUENTAS_MAPEO buscando especificamente NOMBRE_CORTO y
- * ULTIMOS_DIGITOS. Distinto a proposito de _buildCatCuentasArray
- * (Codigo.js): esa funcion sirve para matchear movimientos bancarios por
- * NUMERO_CUENTA completo y no expone ULTIMOS_DIGITOS -- forzarla aqui
- * hubiera requerido derivar ULTIMOS_DIGITOS del numero de cuenta, y ya
- * se verifico con datos reales que NO son los ultimos digitos literales
- * del numero completo. */
+/** Lee CAT_CUENTAS_MAPEO buscando NOMBRE_CORTO, ULTIMOS_DIGITOS y
+ * NOMBRE_SOCIEDAD (este ultimo agregado 2026-08-02 para el fallback por
+ * nombre completo, ver _resolverSociedadDesdeNombreEmpresa). Distinto a
+ * proposito de _buildCatCuentasArray (Codigo.js): esa funcion sirve para
+ * matchear movimientos bancarios por NUMERO_CUENTA completo y no expone
+ * ULTIMOS_DIGITOS -- forzarla aqui hubiera requerido derivar
+ * ULTIMOS_DIGITOS del numero de cuenta, y ya se verifico con datos
+ * reales que NO son los ultimos digitos literales del numero completo.
+ *
+ * Ya no filtra por ULTIMOS_DIGITOS no vacio (antes si) -- una sociedad
+ * puede tener filas de cuenta sin ese dato y aun asi ser resoluble por
+ * NOMBRE_SOCIEDAD; el filtro viejo las hubiera descartado sin razon
+ * para ese caso. No cambia el comportamiento de la busqueda por codigo
+ * (ultimosDigitos vacio nunca coincide con un codigo real, que siempre
+ * son digitos). */
 function _leerCatCuentasPorUltimosDigitos(ss) {
   var sheet = ss.getSheetByName('CAT_CUENTAS_MAPEO');
   if (!sheet || sheet.getLastRow() < 2) return [];
@@ -1550,21 +1558,53 @@ function _leerCatCuentasPorUltimosDigitos(ss) {
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) { return String(h || '').trim().toUpperCase(); });
   var iUlt = headers.indexOf('ULTIMOS_DIGITOS');
   var iCorto = headers.indexOf('NOMBRE_CORTO');
-  if (iUlt < 0 || iCorto < 0) return [];
+  var iSoc = headers.indexOf('NOMBRE_SOCIEDAD');
+  if (iCorto < 0) return [];
   return sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getValues()
-    .filter(function (row) { return row[iUlt] !== '' && row[iUlt] != null; })
-    .map(function (row) { return { ultimosDigitos: String(row[iUlt]).trim(), nombreCorto: String(row[iCorto] || '').trim() }; });
+    .filter(function (row) { return String(row[iCorto] || '').trim(); })
+    .map(function (row) {
+      return {
+        ultimosDigitos: iUlt >= 0 ? String(row[iUlt] || '').trim() : '',
+        nombreCorto: String(row[iCorto] || '').trim(),
+        nombreSociedad: iSoc >= 0 ? String(row[iSoc] || '').trim() : ''
+      };
+    });
 }
 
 /** El nombre trae el codigo pegado al final (ej. "Blau Life SAPI de CV
  * 8332") -- se extrae el numero final y se busca contra ULTIMOS_DIGITOS.
- * Nunca inventa una sociedad si no hay match. */
+ * Nunca inventa una sociedad si no hay match.
+ *
+ * Fallback por nombre completo (2026-08-02, pedido explicito del
+ * usuario, caso real "Soccer Loco Holding" -- llega SIN numero al final
+ * en el Excel real, a diferencia del resto de sociedades). Aplica a
+ * CUALQUIER propuesta, no solo a esa sociedad: si "Nombre empresa" no
+ * trae ningun numero al final, se compara contra NOMBRE_SOCIEDAD
+ * (trim() de extremos + mayusculas -- NO colapsa espacios dobles
+ * internos ni normaliza acentos; si eso llega a fallar para una
+ * sociedad nueva, cae al mismo mensaje "no reconocida" de siempre, no
+ * en silencio). Si SI trae numero pero
+ * ese numero no matchea ningun ULTIMOS_DIGITOS, NO cae a este fallback
+ * -- eso seguiria siendo "no reconocida" como antes (un numero
+ * equivocado es una señal real de error, no debe enmascararse
+ * intentando adivinar por nombre). Una sociedad real puede tener varias
+ * filas/cuentas en el catalogo (ej. Soccer Loco: MXN/USD/nomina) --
+ * todas comparten el mismo NOMBRE_CORTO, asi que basta la primera
+ * coincidencia. */
 function _resolverSociedadDesdeNombreEmpresa(nombreEmpresa, catCuentas) {
-  var m = String(nombreEmpresa || '').trim().match(/(\d+)\s*$/);
-  if (!m) return null;
-  var codigo = m[1];
-  var match = catCuentas.filter(function (c) { return c.ultimosDigitos === codigo; })[0];
-  return match ? match.nombreCorto : null;
+  var nombreLimpio = String(nombreEmpresa || '').trim();
+  if (!nombreLimpio) return null;
+
+  var m = nombreLimpio.match(/(\d+)\s*$/);
+  if (m) {
+    var codigo = m[1];
+    var matchPorCodigo = catCuentas.filter(function (c) { return c.ultimosDigitos === codigo; })[0];
+    return matchPorCodigo ? matchPorCodigo.nombreCorto : null;
+  }
+
+  var nombreUpper = nombreLimpio.toUpperCase();
+  var matchPorNombre = catCuentas.filter(function (c) { return c.nombreSociedad && c.nombreSociedad.toUpperCase() === nombreUpper; })[0];
+  return matchPorNombre ? matchPorNombre.nombreCorto : null;
 }
 
 /** Mismo saneo que _limpiarMonto en Svc_Parser_Movimientos.js (no
