@@ -3062,10 +3062,17 @@ function _tcDelDiaOrNull(ss, fechaDate) {
  *   compra al TC de referencia, hubo compra al TC real capturado).
  * - Si NO hubo conversion y la moneda es extranjera (se pago desde una
  *   cuenta en esa misma moneda, ej. USD paga USD): el monto esta en esa
- *   moneda tal cual ("Monto M.E."), y "Monto MXN"/"TC del dia" se
- *   calculan SOLO si esa moneda tiene referencia diaria real
- *   (TC_DIA_MONEDAS_SOPORTADAS -- hoy unicamente USD); si no, ambas
- *   quedan en blanco en vez de inventar una tasa.
+ *   moneda tal cual ("Monto M.E."). "TC del dia" (referencia) se calcula
+ *   si esa moneda tiene referencia diaria real (TC_DIA_MONEDAS_SOPORTADAS
+ *   -- hoy unicamente USD), solo para mostrarlo aparte como comparacion.
+ *   "Monto MXN" da PRIORIDAD al TC real capturado por Tesoreria
+ *   (TC_APLICADO, informativo -- se puede llenar aunque no haya
+ *   conversion formal, ver View_Pagos.html linea ~932) sobre esa
+ *   referencia; solo cae al "TC del dia" si no hay TC_APLICADO. Si
+ *   ninguno de los dos existe, "Monto MXN" queda en blanco en vez de
+ *   inventar una tasa (hallazgo real 2026-08-02: version anterior
+ *   ignoraba TC_APLICADO aqui y usaba la referencia generica, produciendo
+ *   un monto MXN incorrecto para partidas con TC informativo capturado).
  * - Si la moneda es MXN nativa: "Monto M.E." queda en blanco, "Monto
  *   MXN" es el monto tal cual, TC no aplica.
  *
@@ -3138,7 +3145,19 @@ function getHistoricoPagos(payload) {
 
       var hayConversion = !!(f.monedaPagoReal && f.monedaPagoReal !== f.moneda);
       var monedaExtranjera = f.moneda !== 'MXN';
-      var tcAplicadoNum = (hayConversion && f.tcAplicado) ? Number(f.tcAplicado) : null;
+      // Hallazgo real 2026-08-02 (reportado por el usuario con caso real:
+      // 2 partidas USD, TC 17.4312 capturado, reporte mostraba un monto
+      // MXN sin relacion con ese TC): ANTES este calculo solo leia
+      // f.tcAplicado cuando hayConversion era true -- pero TC_APLICADO se
+      // puede capturar como dato informativo aunque monedaPagoReal NUNCA
+      // se haya cambiado (partida pagada desde una cuenta en su propia
+      // moneda extranjera, ver comentario de View_Pagos.html linea ~932:
+      // "el TC es solo informativo... se puede capturar siempre que la
+      // partida no sea MXN"). Gatearlo detras de hayConversion descartaba
+      // el TC real capturado por Tesoreria y caia a _tcDelDiaOrNull (una
+      // referencia generica de mercado, no lo que de verdad se uso) --
+      // ahora se lee independientemente de hayConversion.
+      var tcAplicadoNum = (f.tcAplicado !== '' && f.tcAplicado != null && Number(f.tcAplicado) > 0) ? Number(f.tcAplicado) : null;
 
       f.tcAplicado = tcAplicadoNum;
       f.tcDelDia = null;
@@ -3146,13 +3165,24 @@ function getHistoricoPagos(payload) {
       f.montoMxn = null;
 
       if (hayConversion) {
+        // monto ya viene en MXN (ver _montoEfectivoPartida, se convierte
+        // ANTES de repartirse en exhibiciones) -- se reconstruye el monto
+        // en moneda extranjera dividiendo entre el TC real capturado.
         f.montoMxn = f.montoAplicado;
         f.montoMonedaExtranjera = tcAplicadoNum ? (f.montoAplicado / tcAplicadoNum) : null;
       } else if (monedaExtranjera) {
         f.montoMonedaExtranjera = f.montoAplicado;
         if (TC_DIA_MONEDAS_SOPORTADAS.indexOf(f.moneda) >= 0 && f.fecha) {
-          f.tcDelDia = _tcDelDiaOrNull(ss, f.fecha);
-          f.montoMxn = f.tcDelDia ? (f.montoAplicado * f.tcDelDia) : null;
+          f.tcDelDia = _tcDelDiaOrNull(ss, f.fecha); // referencia, se muestra aparte para comparar aunque no se use para el monto
+        }
+        // El TC real capturado por Tesoreria SIEMPRE tiene prioridad
+        // sobre la referencia generica del dia para calcular Monto MXN --
+        // es el dato verificado de esta partida especifica, no un
+        // promedio de mercado.
+        if (tcAplicadoNum) {
+          f.montoMxn = f.montoAplicado * tcAplicadoNum;
+        } else if (f.tcDelDia) {
+          f.montoMxn = f.montoAplicado * f.tcDelDia;
         }
       } else {
         f.montoMxn = f.montoAplicado;
