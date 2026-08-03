@@ -41,7 +41,13 @@
     ccListaCompleta: [], ccSociedades: [], ccSociedadSel: '',
     ccLoading: true, ccSaving: false, ccError: null,
     ccNewEmail: '', ccNewNombre: '', ccUsuario: null,
-    ccNuevoSociedades: {}, ccCargado: false
+    ccNuevoSociedades: {}, ccCargado: false,
+    // Modo "por persona" (2026-08-02): ver/editar el estado de un email a
+    // traves de TODAS las sociedades a la vez -- antes solo se podia ver
+    // sociedad por sociedad (dropdown), lo que hacia facil pensar que se
+    // "desactivo" a alguien cuando en realidad solo se desactivo en la
+    // sociedad que se tenia seleccionada, mientras seguia activo en otra.
+    ccModo: 'sociedad', ccPersonaQuery: ''
   };
 
   function cargarLista() {
@@ -292,6 +298,18 @@
     ]);
   }
 
+  /** Switch on/off reusado por `ccRenderFilaDestinatario` (modo sociedad) y
+   * `ccRenderFilaPersonaSociedad` (modo persona, 2026-08-02) -- mismo
+   * control visual en ambos, antes duplicado literal. */
+  function ccRenderToggle(activo, editable, onToggle) {
+    return VEVA.dom.el('button', {
+      class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]') + (editable ? '' : ' opacity-50 cursor-not-allowed'),
+      onClick: editable ? onToggle : null
+    }, [
+      VEVA.dom.el('span', { class: 'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ' + (activo ? 'left-5' : 'left-0.5') }, [])
+    ]);
+  }
+
   function ccRenderFilaDestinatario(r, i) {
     var editable = ccPuedeEditar();
     var claveFila = 'cc-row-' + r.email;
@@ -311,12 +329,7 @@
       celdaNombre = VEVA.dom.el('td', { class: 'px-5 py-3 text-[#697386]' }, [r.nombre || '—']);
     }
 
-    var toggle = VEVA.dom.el('button', {
-      class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (r.activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]') + (editable ? '' : ' opacity-50 cursor-not-allowed'),
-      onClick: editable ? function () { ccToggleActivo(i); } : null
-    }, [
-      VEVA.dom.el('span', { class: 'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ' + (r.activo ? 'left-5' : 'left-0.5') }, [])
-    ]);
+    var toggle = ccRenderToggle(r.activo, editable, function () { ccToggleActivo(i); });
     return VEVA.dom.el('tr', { class: r.activo ? '' : 'opacity-50' }, [
       celdaEmail,
       celdaNombre,
@@ -398,6 +411,123 @@
     ]);
   }
 
+  // ---- Modo "por persona" (2026-08-02) ----
+
+  function ccEmailsUnicos() {
+    var vistos = {};
+    state.ccListaCompleta.forEach(function (r) { if (r.email) vistos[r.email] = true; });
+    return Object.keys(vistos).sort();
+  }
+
+  /** Al activar a alguien en una sociedad donde todavia no tiene fila, se
+   * usa el nombre que ya tenga capturado en OTRA sociedad como valor por
+   * defecto (editable despues) -- evita crear una fila con nombre vacio
+   * si ya se conoce de otro lado. */
+  function ccMejorNombreParaEmail(email) {
+    var fila = state.ccListaCompleta.filter(function (r) { return r.email === email && r.nombre; })[0];
+    return fila ? fila.nombre : '';
+  }
+
+  /** Prende/apaga a `email` en `sociedad` desde el modo "por persona". Si
+   * ya existia una fila para esa combinacion, solo cambia `activo` (igual
+   * que ccToggleActivo). Si NO existia (la persona nunca se agrego a esa
+   * sociedad) y se esta prendiendo, crea la fila -- decision explicita del
+   * usuario: un clic desde esta vista es intencional y debe bastar, sin
+   * pasar por el formulario de alta. */
+  function ccTogglePersonaSociedad(email, sociedad) {
+    var listaSoc = ccListaDeSociedad(sociedad);
+    var idx = listaSoc.map(function (r) { return r.email; }).indexOf(email);
+    var nueva = idx >= 0
+      ? listaSoc.map(function (r, i) { return i === idx ? Object.assign({}, r, { activo: !r.activo }) : r; })
+      : listaSoc.concat([{ email: email, nombre: ccMejorNombreParaEmail(email), activo: true }]);
+    state.ccSaving = true; redraw();
+    ccGuardarParaSociedad(sociedad, nueva)
+      .then(function (r) { if (!r.ok) state.ccError = r.message; })
+      .finally(function () { state.ccSaving = false; redraw(); });
+  }
+
+  function ccRenderFilaPersonaSociedad(email, sociedad) {
+    var fila = ccListaDeSociedad(sociedad).filter(function (r) { return r.email === email; })[0];
+    var activo = !!(fila && fila.activo);
+    var editable = ccPuedeEditar();
+    var toggle = ccRenderToggle(activo, editable, function () { ccTogglePersonaSociedad(email, sociedad); });
+    return VEVA.dom.el('tr', { class: activo ? '' : 'opacity-50' }, [
+      VEVA.dom.el('td', { class: 'px-5 py-3 font-semibold text-[13px]' }, [sociedad]),
+      VEVA.dom.el('td', { class: 'px-5 py-3 text-[#697386] text-[12px]' }, [fila ? (fila.nombre || '—') : 'Sin copia configurada aquí']),
+      VEVA.dom.el('td', { class: 'px-5 py-3 text-center' }, [toggle])
+    ]);
+  }
+
+  function ccRenderTablaPorPersona(email) {
+    var thead = VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', { class: 'border-b border-[#e6ebf1]' }, [
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Sociedad']),
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-left text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']),
+      VEVA.dom.el('th', { class: 'px-5 py-2 text-center text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Activo'])
+    ])]);
+    var rows = state.ccSociedades.map(function (s) { return ccRenderFilaPersonaSociedad(email, s); });
+    return VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, rows)]);
+  }
+
+  function ccRenderBuscadorPersona() {
+    var datalistId = 'cc-persona-emails-datalist';
+    var datalist = VEVA.dom.el('datalist', { id: datalistId }, ccEmailsUnicos().map(function (e) { return VEVA.dom.el('option', { value: e }, []); }));
+    var input = VEVA.dom.el('input', {
+      type: 'email',
+      list: datalistId,
+      placeholder: 'correo@empresa.com',
+      'data-focus-key': 'cc-persona-buscador',
+      class: 'w-full text-[13px] border border-[#e6ebf1] rounded-lg px-3 py-2.5 bg-white outline-none focus:border-[#635bff]'
+    }, []);
+    input.value = state.ccPersonaQuery;
+    input.addEventListener('input', function (e) { state.ccPersonaQuery = e.target.value; redraw(); });
+    return VEVA.dom.el('div', { class: 'space-y-1' }, [
+      VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Buscar persona por email']),
+      input, datalist
+    ]);
+  }
+
+  function ccRenderModoPersona() {
+    var children = [ccRenderBuscadorPersona()];
+    if (state.ccLoading) {
+      children.push(VEVA.dom.el('div', { class: 'p-6 space-y-2 bg-white rounded-xl border border-[#e6ebf1]' }, [1, 2, 3].map(function () { return VEVA.dom.el('div', { class: 'h-12 bg-[#f6f9fc] rounded-lg animate-pulse' }, []); })));
+      return VEVA.dom.el('div', { class: 'space-y-4' }, children);
+    }
+    var query = state.ccPersonaQuery.trim();
+    if (!query) {
+      children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['Escribe un email para ver en qué sociedades tiene copia configurada.']));
+      return VEVA.dom.el('div', { class: 'space-y-4' }, children);
+    }
+    var match = ccEmailsUnicos().filter(function (e) { return e.toLowerCase() === query.toLowerCase(); })[0];
+    if (match) {
+      children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+        VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc]' }, [VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Copia (CC) de ' + match + ' — todas las sociedades'])]),
+        ccRenderTablaPorPersona(match)
+      ]));
+    } else if (query.indexOf('@') >= 0) {
+      var accion = ccPuedeEditar() ? VEVA.dom.el('button', {
+        class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all',
+        onClick: function () { state.ccNewEmail = query; state.ccModo = 'sociedad'; redraw(); }
+      }, ['Agregar "' + query + '" como nuevo destinatario']) : null;
+      children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-6 text-center space-y-3' }, [
+        VEVA.dom.el('p', { class: 'text-[13px] text-[#697386]' }, ['"' + query + '" todavía no tiene copia configurada en ninguna sociedad.'])
+      ].concat(accion ? [accion] : [])));
+    } else {
+      children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['Escribe un email completo para buscar.']));
+    }
+    return VEVA.dom.el('div', { class: 'space-y-4' }, children);
+  }
+
+  function ccRenderModoToggle() {
+    var modos = [{ id: 'sociedad', label: 'Por sociedad' }, { id: 'persona', label: 'Por persona' }];
+    return VEVA.dom.el('div', { class: 'flex items-center gap-1 bg-[#f6f9fc] rounded-lg p-1' }, modos.map(function (m) {
+      var active = state.ccModo === m.id;
+      return VEVA.dom.el('button', {
+        class: 'px-3 py-1.5 rounded-md text-[12px] font-semibold transition-all ' + (active ? 'bg-white text-[#635bff] shadow-sm' : 'text-[#697386] hover:text-[#0a2540]'),
+        onClick: function () { state.ccModo = m.id; redraw(); }
+      }, [m.label]);
+    }));
+  }
+
   function ccRenderTab() {
     var children = [ccRenderNota()];
     if (state.ccError) {
@@ -407,8 +537,8 @@
       children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay sociedades en el catálogo de cuentas todavía.']));
       return VEVA.dom.el('div', { class: 'space-y-6' }, children);
     }
-    children.push(VEVA.dom.el('div', { class: 'flex items-center justify-end' }, [ccRenderSelectorSociedad()]));
-    children.push(ccRenderDestinatarios());
+    children.push(VEVA.dom.el('div', { class: 'flex items-center justify-between' }, [ccRenderModoToggle(), state.ccModo === 'sociedad' ? ccRenderSelectorSociedad() : null].filter(Boolean)));
+    children.push(state.ccModo === 'persona' ? ccRenderModoPersona() : ccRenderDestinatarios());
     return VEVA.dom.el('div', { class: 'space-y-6' }, children);
   }
 
