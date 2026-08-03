@@ -1020,12 +1020,24 @@
    * nueva, solo no se habia notado hasta ahora. Un elemento real (como ya
    * hacia el <span> de "Monto") SI se respeta como celda propia; de ahi
    * que "Monto" fuera la unica columna que se veia bien. */
-  function celdaHead(texto, claseExtra) { return VEVA.dom.el('span', { class: claseExtra || '' }, [texto]); }
+  /** Hallazgo real 2026-08-02 (segunda ronda, screenshot del usuario):
+   * envolver cada etiqueta en su propio <span> (fix anterior) resuelve
+   * que cada una ocupe su propia celda de grid, pero una celda de grid
+   * SIN `min-width:0`/`overflow:hidden` no se recorta -- si el texto es
+   * mas ancho que su columna (ej. "Referencia" en una columna de 90px),
+   * la caja crece mas alla del ancho definido y se encima visualmente
+   * con la columna vecina ("ReferenciaDescripción" pegados). Se agrega
+   * truncamiento con "..." (nunca se pierde el texto completo -- queda
+   * en el atributo title, visible al pasar el mouse) y se reduce el
+   * tamano de fuente (pedido explicito del usuario, "mas pequeños"). */
+  function celdaHead(texto, claseExtra) {
+    return VEVA.dom.el('span', { class: 'truncate whitespace-nowrap min-w-0' + (claseExtra ? ' ' + claseExtra : ''), title: texto || null }, [texto]);
+  }
   function renderColHead(tab) {
     var cols = (tab === 'banca' || tab === 'aplicado')
       ? [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead(tab === 'banca' ? 'Subir' : 'Aplicar'), celdaHead(tab === 'banca' ? 'Rechazar' : 'No pagado'), celdaHead('Comentario')]
       : [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Comentario')];
-    return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
+    return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[8.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
   }
 
   // ---- Render: grupo de proveedor repetido (2+ lineas en la misma
