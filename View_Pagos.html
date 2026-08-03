@@ -1008,10 +1008,23 @@
   var COL_HEAD_STYLE = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 90px 1fr';
   var COL_HEAD_STYLE_RESOLVER = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 60px 60px 1fr';
   function colHeadStyle(tab) { return (tab === 'banca' || tab === 'aplicado') ? COL_HEAD_STYLE_RESOLVER : COL_HEAD_STYLE; }
+  /** Envuelve cada etiqueta en su propio <span> antes de pasarla como hijo
+   * de un contenedor `grid` -- hallazgo real 2026-08-02 (reportado por el
+   * usuario con captura + inspeccion del HTML real): varios strings
+   * sueltos SEGUIDOS como hijos de un mismo div `grid` no obtienen cada
+   * uno su propia celda -- el navegador los fusiona en una sola caja
+   * anonima compartida (igual que pasa con texto normal en cualquier
+   * layout de bloque/inline), asi que terminan amontonados en una sola
+   * columna en vez de repartidos en las 9/8 columnas reales. Ya pasaba
+   * en produccion desde antes de esta sesion -- no es una regresion
+   * nueva, solo no se habia notado hasta ahora. Un elemento real (como ya
+   * hacia el <span> de "Monto") SI se respeta como celda propia; de ahi
+   * que "Monto" fuera la unica columna que se veia bien. */
+  function celdaHead(texto, claseExtra) { return VEVA.dom.el('span', { class: claseExtra || '' }, [texto]); }
   function renderColHead(tab) {
     var cols = (tab === 'banca' || tab === 'aplicado')
-      ? ['', 'Proveedor', 'Referencia', 'Descripción', VEVA.dom.el('span', { class: 'text-right' }, ['Monto']), 'Autorización', (tab === 'banca' ? 'Subir' : 'Aplicar'), (tab === 'banca' ? 'Rechazar' : 'No pagado'), 'Comentario']
-      : ['', 'Proveedor', 'Referencia', 'Descripción', VEVA.dom.el('span', { class: 'text-right' }, ['Monto']), 'Autorización', 'Estatus', 'Comentario'];
+      ? [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead(tab === 'banca' ? 'Subir' : 'Aplicar'), celdaHead(tab === 'banca' ? 'Rechazar' : 'No pagado'), celdaHead('Comentario')]
+      : [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Comentario')];
     return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
   }
 
@@ -1893,7 +1906,10 @@
   }
 
   function renderComprobantesHead() {
-    return VEVA.dom.el('div', { class: 'grid gap-2 px-3 py-1.5 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: 'grid-template-columns:20px 70px 110px 1.4fr 100px 1.2fr' }, ['', 'Fecha', 'Sociedad', 'Proveedor / Concepto', 'Importe', 'Comprobante']);
+    // Mismo hallazgo/fix que renderColHead: cada etiqueta en su propio
+    // <span> (via celdaHead), nunca strings sueltos seguidos como hijos
+    // directos de un div `grid` -- se fusionan en una sola celda.
+    return VEVA.dom.el('div', { class: 'grid gap-2 px-3 py-1.5 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[9.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: 'grid-template-columns:20px 70px 110px 1.4fr 100px 1.2fr' }, [celdaHead(''), celdaHead('Fecha'), celdaHead('Sociedad'), celdaHead('Proveedor / Concepto'), celdaHead('Importe'), celdaHead('Comprobante')]);
   }
 
   function renderComprobantePartidaRow(p) {
