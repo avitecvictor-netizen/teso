@@ -634,6 +634,17 @@
       redraw();
       return;
     }
+    // Candado del TC (2026-08-02, pedido explicito del usuario): se
+    // valida aqui, AL MOMENTO de aplicar -- no como aviso permanente al
+    // cargar la propuesta. Mismo respaldo tambien en el backend
+    // (_aplicarPagoParcialCore), esto solo evita el viaje redondo si ya
+    // se puede saber de antemano en el cliente.
+    var sinTc = aMarcarAplicar.filter(function (l) { return l.monedaPagoReal === 'MXN' && !l.tcAplicado; });
+    if (sinTc.length) {
+      state.error = sinTc.length + ' partida(s) marcadas "MXN (acuerdo)" sin TC capturado. Captura el tipo de cambio antes de aplicar.';
+      redraw();
+      return;
+    }
     var aplicar = aMarcarAplicar.map(function (l) {
       return { partidaId: l.id, monto: montoResolverAplicado(l) };
     });
@@ -856,14 +867,21 @@
   // ---- Render: una linea (partida) individual. mostrarProveedor=false
   // cuando ya se muestra en el encabezado del grupo (proveedor repetido). ----
   function renderLineRow(l, tab, mostrarProveedor, sociedad) {
+    // Aplicado tiene su propio grid de 10 columnas (Cuenta/Se paga en/TC/
+    // ≈MXN separadas, ver COL_HEAD_STYLE_APLICADO) -- se despacha a su
+    // propia funcion en vez de seguir compartiendo esta, para no arriesgar
+    // el layout de las otras 4 pestañas (2026-08-02, rediseño aprobado
+    // por el usuario vía mockup).
+    if (tab === 'aplicado') return renderLineRowAplicado(l, mostrarProveedor, sociedad);
+
     var isParcial = l.approvalType === 'parcial';
-    // Pieza 1 (2026-07-28): en Banca/Aplicado este checkbox no tiene
-    // ningun efecto real desde el Bloque F -- la accion real usa
+    // Pieza 1 (2026-07-28): en Banca este checkbox no tiene ningun efecto
+    // real desde el Bloque F -- la accion real usa
     // l._resolverPositivo/_resolverNegativo, no l.checked. Se deja
     // visible pero deshabilitado (en vez de quitar la columna, que
-    // obligaria a rehacer el grid compartido con las otras 3 fases) para
+    // obligaria a rehacer el grid compartido con las otras 2 fases) para
     // no confundir al usuario pensando que selecciona algo que hace.
-    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: (tab === 'banca' || tab === 'aplicado') ? 'disabled' : null, title: (tab === 'banca' || tab === 'aplicado') ? 'No aplica en esta fase — usa Subir/Rechazar o Aplicar/No pagado' : null }, []);
+    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: tab === 'banca' ? 'disabled' : null, title: tab === 'banca' ? 'No aplica en esta fase — usa Subir/Rechazar' : null }, []);
     cb.checked = !!l.checked;
     cb.addEventListener('change', function (e) { toggleLineChecked(l, e.target.checked); });
 
@@ -901,65 +919,6 @@
         authChildren.push(amtInput);
       }
       authCell = VEVA.dom.el('div', { class: 'flex items-center' }, authChildren);
-    } else if (tab === 'aplicado' && esTesoreria()) {
-      // Reusa este mismo slot (vacio en la pestaña Aplicado para
-      // cualquier otro tab) para CUENTA_PAGO -- de que cuenta se pago,
-      // necesario para poder agrupar Sociedad->Banco en la pestaña de
-      // Conciliacion ANTES de que exista un match real -- y, solo si la
-      // partida no es MXN, moneda real de pago + TC (2026-07-26, ver
-      // seccion 3.3 del prompt). Cero columnas nuevas en la tabla.
-      //
-      // Hallazgo real del revisor (2026-07-26, bloque cuenta-obligatoria):
-      // este slot antes solo se mostraba con `l.pagado` ya en true -- un
-      // candado circular, porque la validacion nueva exige CUENTA_PAGO
-      // ANTES de poder pasar a pagado:true. Se quita `&& l.pagado` para
-      // que el selector este disponible tambien mientras la partida sigue
-      // sin pagar (es cuando de verdad hace falta capturarlo).
-      var cuentasSoc = (state.catalogoCuentas || []).filter(function (c) { return c.nombreCorto === sociedad; });
-      var selCuenta = VEVA.dom.el('select', { class: 'w-full h-6 border border-[#e6ebf1] rounded px-1 text-[10.5px] outline-none focus:border-[#635bff]' },
-        [VEVA.dom.el('option', { value: '' }, ['Cuenta de pago...'])].concat(cuentasSoc.map(function (c) {
-          return VEVA.dom.el('option', { value: c.cuenta }, [(c.banco || '?') + ' ••' + String(c.cuenta).slice(-4)]);
-        })));
-      selCuenta.value = l.cuentaPago || '';
-      selCuenta.addEventListener('change', function (e) { setCuentaPago(l, e.target.value); });
-      var authChildrenAplicado = [selCuenta];
-
-      if (l.moneda && l.moneda !== 'MXN') {
-        // Bug real reportado 2026-07-28: el TC solo se podia capturar si
-        // se elegia convertir la liquidacion a MXN -- una partida que se
-        // paga en su propia moneda extranjera (USD/GBP/EUR, sin
-        // convertir) se quedaba sin forma de registrar el TC usado. Fix:
-        // el input de TC ya NO depende de la eleccion de moneda de pago
-        // real -- se puede capturar siempre que la partida no sea MXN.
-        // Si monedaPagoReal queda igual a la moneda propia, el TC es
-        // solo informativo (_montoEfectivoPartida en el backend no lo
-        // aplica al monto exigido salvo que monedaPagoReal SI difiera).
-        var selMonedaReal = VEVA.dom.el('select', { class: 'h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, [
-          VEVA.dom.el('option', { value: l.moneda }, [l.moneda + ' (igual)']),
-          VEVA.dom.el('option', { value: 'MXN' }, ['MXN (acuerdo)'])
-        ]);
-        var monedaRealActual = l.monedaPagoReal || l.moneda;
-        selMonedaReal.value = monedaRealActual === 'MXN' ? 'MXN' : l.moneda;
-        var inputTc = VEVA.dom.el('input', { type: 'number', step: '0.0001', placeholder: 'TC', class: 'w-14 h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, []);
-        inputTc.value = l.tcAplicado || '';
-        selMonedaReal.addEventListener('change', function (e) {
-          l.monedaPagoReal = e.target.value;
-          redraw();
-          if (l.tcAplicado) setPagoReal(l, e.target.value, l.tcAplicado);
-        });
-        inputTc.addEventListener('change', function (e) {
-          setPagoReal(l, l.monedaPagoReal || l.moneda, e.target.value);
-        });
-        var tcNum = Number(l.tcAplicado);
-        var mxnEquiv = tcNum > 0 ? VEVA.dom.el('span', { class: 'text-[9.5px] text-[#8792a2] font-mono' }, ['≈ MXN ' + fmtMonto(Number(l.monto) * tcNum)]) : null;
-        authChildrenAplicado.push(VEVA.dom.el('div', { class: 'flex flex-col gap-0.5 mt-1' }, [
-          VEVA.dom.el('div', { class: 'flex gap-1' }, [selMonedaReal, inputTc]),
-          mxnEquiv
-        ].filter(Boolean)));
-      }
-      authCell = VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, authChildrenAplicado);
-    } else if (tab === 'aplicado' && l.cuentaPago) {
-      authCell = VEVA.dom.el('span', { class: 'text-[10.5px] text-[#697386] font-mono' }, ['••' + String(l.cuentaPago).slice(-4)]);
     }
 
     var statusCell = VEVA.dom.el('span', {}, []);
@@ -970,29 +929,18 @@
     } else if (tab === 'banca') {
       var celdasB = renderCeldasBanca(l);
       celdaPositivo = celdasB.positivo; celdaNegativo = celdasB.negativo;
-    } else if (tab === 'aplicado') {
-      var celdasA = renderCeldasAplicado(l);
-      celdaPositivo = celdasA.positivo; celdaNegativo = celdasA.negativo;
     }
 
     // COMENTARIO: por que sigue bloqueado -- se oculta justo al terminar.
     var commentCell = VEVA.dom.el('span', {}, []);
-    if ((tab === 'banca' && !l.subido) || (tab === 'aplicado' && !l.pagado)) {
+    if (tab === 'banca' && !l.subido) {
       var cmtInput = VEVA.dom.el('input', { 'data-focus-key': 'comentario-' + l.id, class: 'w-full h-6 border border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Comentario' }, []);
       cmtInput.value = l.comentario || '';
       cmtInput.addEventListener('change', function (e) { setComentario(l, e.target.value); });
       commentCell = cmtInput;
     }
-    // NOTA_APLICACION: como se resolvio al pagar (TC, compra de divisa) --
-    // campo separado de COMENTARIO, visible solo una vez pagada.
-    if (tab === 'aplicado' && l.pagado) {
-      var notaInput = VEVA.dom.el('input', { 'data-focus-key': 'nota-' + l.id, class: 'w-full h-6 border border-dashed border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Nota de aplicacion (TC, compra de divisa...)' }, []);
-      notaInput.value = l.notaAplicacion || '';
-      notaInput.addEventListener('change', function (e) { setNotaAplicacion(l, e.target.value); });
-      commentCell = notaInput;
-    }
 
-    var esFaseResolver = (tab === 'banca' || tab === 'aplicado');
+    var esFaseResolver = (tab === 'banca');
     var filaBase = [
       cb,
       provCell,
@@ -1005,9 +953,129 @@
     return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc]', style: colHeadStyle(tab) }, filaBase.concat(filaResto));
   }
 
+  /** Fila de partida dedicada a la pestaña Aplicado (2026-08-02, rediseño
+   * aprobado por el usuario vía mockup): Cuenta/Se paga en/TC/≈MXN eran 4
+   * controles amontonados en una sola celda de ~110px compartida con
+   * Banca -- ahora son columnas reales propias (COL_HEAD_STYLE_APLICADO,
+   * 10 columnas). Extraida aparte (no una 5a rama en renderLineRow) para
+   * que Banca/Tesorería/Liberación2/Contabilidad, que siguen usando
+   * renderLineRow sin tocar, queden con cero riesgo de regresión.
+   * Reusa renderCeldasAplicado tal cual (checkbox "Aplicar"+monto+
+   * progreso, checkbox "No pagado") -- no se duplica esa logica, solo se
+   * reubica su salida en columnas separadas en vez de una celda comun. */
+  function renderLineRowAplicado(l, mostrarProveedor, sociedad) {
+    var cb = VEVA.dom.el('input', { type: 'checkbox', disabled: 'disabled', title: 'No aplica en esta fase — usa Aplicar/No pagado' }, []);
+    cb.checked = !!l.checked;
+    cb.addEventListener('change', function (e) { toggleLineChecked(l, e.target.checked); });
+
+    var provCell = VEVA.dom.el('div', { class: 'min-w-0' }, []);
+    if (mostrarProveedor) {
+      var detalle = [l.referencia, l.desc].filter(Boolean).join(' · ');
+      provCell = VEVA.dom.el('div', { class: 'min-w-0' }, [
+        VEVA.dom.el('div', { class: 'flex items-baseline gap-1.5' }, [
+          l.numeroProveedor ? VEVA.dom.el('span', { class: 'font-mono text-[9.5px] text-[#8792a2] flex-shrink-0' }, [String(l.numeroProveedor)]) : null,
+          VEVA.dom.el('span', { class: 'text-[12px] font-semibold truncate', title: l.proveedor }, [l.proveedor || '—'])
+        ].filter(Boolean)),
+        detalle ? VEVA.dom.el('div', { class: 'truncate text-[10.5px] text-[#697386]', title: detalle }, [detalle]) : null
+      ].filter(Boolean));
+    }
+
+    var montoCell = VEVA.dom.el('span', { class: 'text-right text-[12px] font-semibold' }, [fmtMontoDivisa(l.monto, l.moneda)]);
+
+    // CUENTA_PAGO -- necesaria para agrupar Sociedad->Banco en
+    // Conciliacion ANTES de que exista un match real (2026-07-26).
+    // Hallazgo real del revisor (2026-07-26, bloque cuenta-obligatoria):
+    // no gatear con `&& l.pagado` -- la validacion exige CUENTA_PAGO
+    // ANTES de poder pasar a pagado:true, un candado circular.
+    var cuentaCell = VEVA.dom.el('span', {}, []);
+    if (esTesoreria()) {
+      var cuentasSoc = (state.catalogoCuentas || []).filter(function (c) { return c.nombreCorto === sociedad; });
+      var selCuenta = VEVA.dom.el('select', { class: 'w-full h-6 border border-[#e6ebf1] rounded px-1 text-[10.5px] outline-none focus:border-[#635bff]' },
+        [VEVA.dom.el('option', { value: '' }, ['Cuenta...'])].concat(cuentasSoc.map(function (c) {
+          return VEVA.dom.el('option', { value: c.cuenta }, [(c.banco || '?') + ' ••' + String(c.cuenta).slice(-4)]);
+        })));
+      selCuenta.value = l.cuentaPago || '';
+      selCuenta.addEventListener('change', function (e) { setCuentaPago(l, e.target.value); });
+      cuentaCell = selCuenta;
+    } else if (l.cuentaPago) {
+      cuentaCell = VEVA.dom.el('span', { class: 'text-[10.5px] text-[#697386] font-mono' }, ['••' + String(l.cuentaPago).slice(-4)]);
+    }
+
+    // Se paga en / TC / ≈MXN -- solo aplica si la partida no es MXN
+    // nativa. Celdas VACIAS (nunca null) cuando no aplica, para no
+    // desalinear las 10 columnas del grid (hallazgo del planificador).
+    var sePagaEnCell = VEVA.dom.el('span', {}, []);
+    var tcCell = VEVA.dom.el('span', {}, []);
+    var equivCell = VEVA.dom.el('span', {}, []);
+    if (l.moneda && l.moneda !== 'MXN') {
+      // Bug real reportado 2026-07-28: el TC solo se podia capturar si se
+      // elegia convertir la liquidacion a MXN -- una partida que se paga
+      // en su propia moneda extranjera (USD/GBP/EUR, sin convertir) se
+      // quedaba sin forma de registrar el TC usado. Fix: el input de TC
+      // ya NO depende de la eleccion de moneda de pago real -- se puede
+      // capturar siempre que la partida no sea MXN. Si monedaPagoReal
+      // queda igual a la moneda propia, el TC es solo informativo
+      // (_montoEfectivoPartida en el backend no lo aplica al monto
+      // exigido salvo que monedaPagoReal SI difiera).
+      var selMonedaReal = VEVA.dom.el('select', { class: 'w-full h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, [
+        VEVA.dom.el('option', { value: l.moneda }, [l.moneda + ' (igual)']),
+        VEVA.dom.el('option', { value: 'MXN' }, ['MXN (acuerdo)'])
+      ]);
+      var monedaRealActual = l.monedaPagoReal || l.moneda;
+      selMonedaReal.value = monedaRealActual === 'MXN' ? 'MXN' : l.moneda;
+      var inputTc = VEVA.dom.el('input', { type: 'number', step: '0.0001', placeholder: 'TC', class: 'w-full h-6 border border-[#e6ebf1] rounded px-1 text-[10px] outline-none focus:border-[#635bff]' }, []);
+      inputTc.value = l.tcAplicado || '';
+      selMonedaReal.addEventListener('change', function (e) {
+        l.monedaPagoReal = e.target.value;
+        redraw();
+        if (l.tcAplicado) setPagoReal(l, e.target.value, l.tcAplicado);
+      });
+      inputTc.addEventListener('change', function (e) {
+        setPagoReal(l, l.monedaPagoReal || l.moneda, e.target.value);
+      });
+      var tcNum = Number(l.tcAplicado);
+      sePagaEnCell = selMonedaReal;
+      tcCell = inputTc;
+      equivCell = tcNum > 0
+        ? VEVA.dom.el('span', { class: 'text-[9.5px] text-[#8792a2] font-mono' }, [fmtMonto(Number(l.monto) * tcNum)])
+        : VEVA.dom.el('span', { class: 'text-[9.5px] text-[#c3c9d3] italic' }, ['—']);
+    }
+
+    var celdasA = renderCeldasAplicado(l);
+
+    // COMENTARIO ("por que sigue bloqueado", se oculta al terminar) /
+    // NOTA_APLICACION ("como se resolvio al pagar", visible solo una vez
+    // pagada) -- mismo campo compartido de la fila, nunca los dos a la vez.
+    var commentCell = VEVA.dom.el('span', {}, []);
+    if (!l.pagado) {
+      var cmtInput = VEVA.dom.el('input', { 'data-focus-key': 'comentario-' + l.id, class: 'w-full h-6 border border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Comentario' }, []);
+      cmtInput.value = l.comentario || '';
+      cmtInput.addEventListener('change', function (e) { setComentario(l, e.target.value); });
+      commentCell = cmtInput;
+    } else {
+      var notaInput = VEVA.dom.el('input', { 'data-focus-key': 'nota-' + l.id, class: 'w-full h-6 border border-dashed border-[#e6ebf1] rounded px-1.5 text-[11px] outline-none focus:border-[#635bff]', placeholder: 'Nota de aplicacion (TC, compra de divisa...)' }, []);
+      notaInput.value = l.notaAplicacion || '';
+      notaInput.addEventListener('change', function (e) { setNotaAplicacion(l, e.target.value); });
+      commentCell = notaInput;
+    }
+
+    return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc]', style: COL_HEAD_STYLE_APLICADO }, [
+      cb, provCell, montoCell, cuentaCell, sePagaEnCell, tcCell, equivCell, celdasA.positivo, celdasA.negativo, commentCell
+    ]);
+  }
+
   var COL_HEAD_STYLE = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 90px 1fr';
   var COL_HEAD_STYLE_RESOLVER = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 60px 60px 1fr';
-  function colHeadStyle(tab) { return (tab === 'banca' || tab === 'aplicado') ? COL_HEAD_STYLE_RESOLVER : COL_HEAD_STYLE; }
+  // Rediseño de Aplicado (2026-08-02, aprobado por el usuario vía mockup):
+  // Cuenta/Se paga en/TC/≈MXN eran 4 controles amontonados en la misma
+  // celda de "Autorizacion" (110px) que Banca reusaba sin necesitarlos --
+  // ahora son columnas propias. Aplicado deja de compartir grid con
+  // Banca (10 columnas contra las 9 de COL_HEAD_STYLE_RESOLVER, que
+  // Banca sigue usando sin cambios): checkbox, Proveedor/Referencia
+  // (fusionados), Monto, Cuenta, Se paga en, TC, ≈MXN, Aplicar, No
+  // pagado, Comentario.
+  var COL_HEAD_STYLE_APLICADO = 'grid-template-columns:22px 1.3fr 95px 100px 85px 60px 85px 110px 60px 1fr';
+  function colHeadStyle(tab) { return tab === 'aplicado' ? COL_HEAD_STYLE_APLICADO : (tab === 'banca' ? COL_HEAD_STYLE_RESOLVER : COL_HEAD_STYLE); }
   /** Envuelve cada etiqueta en su propio <span> antes de pasarla como hijo
    * de un contenedor `grid` -- hallazgo real 2026-08-02 (reportado por el
    * usuario con captura + inspeccion del HTML real): varios strings
@@ -1034,9 +1102,14 @@
     return VEVA.dom.el('span', { class: 'truncate whitespace-nowrap min-w-0' + (claseExtra ? ' ' + claseExtra : ''), title: texto || null }, [texto]);
   }
   function renderColHead(tab) {
-    var cols = (tab === 'banca' || tab === 'aplicado')
-      ? [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead(tab === 'banca' ? 'Subir' : 'Aplicar'), celdaHead(tab === 'banca' ? 'Rechazar' : 'No pagado'), celdaHead('Comentario')]
-      : [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Comentario')];
+    var cols;
+    if (tab === 'aplicado') {
+      cols = [celdaHead(''), celdaHead('Proveedor / Referencia'), celdaHead('Monto', 'text-right'), celdaHead('Cuenta'), celdaHead('Se paga en'), celdaHead('TC'), celdaHead('≈ MXN'), celdaHead('Aplicar'), celdaHead('No pagado'), celdaHead('Comentario')];
+    } else if (tab === 'banca') {
+      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Subir'), celdaHead('Rechazar'), celdaHead('Comentario')];
+    } else {
+      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Comentario')];
+    }
     return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[8.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
   }
 
@@ -1254,7 +1327,7 @@
           VEVA.dom.el('span', { class: 'text-[12px] font-semibold text-[#0a2540]' }, [posB.length + ' a subir' + (posB.length ? ' · ' + resumenChipsTexto(posB, montoEfectivo) : '')]),
           negB.length ? VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2]' }, [negB.length + ' a rechazar · ' + resumenChipsTexto(negB, montoEfectivo)]) : null
         ].filter(Boolean));
-        bulkBtns.push(renderBulkBtn('Resolver seleccionadas', 'Resolviendo...', function () { resolverBanca(lineas); }, 'primario'));
+        bulkBtns.push(renderBulkBtn('Subir', 'Subiendo...', function () { resolverBanca(lineas); }, 'primario'));
       } else if (tab === 'aplicado' && esTesoreria()) {
         var posA = lineas.filter(function (l) { return l._resolverPositivo; });
         var negA = lineas.filter(function (l) { return l._resolverNegativo; });
@@ -1262,7 +1335,7 @@
           VEVA.dom.el('span', { class: 'text-[12px] font-semibold text-[#0a2540]' }, [posA.length + ' a aplicar' + (posA.length ? ' · ' + resumenChipsTexto(posA, montoResolverAplicado) : '')]),
           negA.length ? VEVA.dom.el('span', { class: 'text-[11px] text-[#8792a2]' }, [negA.length + ' a marcar no pagada · ' + resumenChipsTexto(negA, montoEfectivo)]) : null
         ].filter(Boolean));
-        bulkBtns.push(renderBulkBtn('Resolver seleccionadas', 'Resolviendo...', function () { resolverAplicado(lineas); }, 'primario'));
+        bulkBtns.push(renderBulkBtn('Aplicar', 'Aplicando...', function () { resolverAplicado(lineas); }, 'primario'));
       }
       if (bulkBtns.length) {
         bodyChildren.push(VEVA.dom.el('div', { class: 'flex justify-between items-center mx-3 my-2.5 bg-white border border-[#e6ebf1] rounded-lg px-3 py-2' }, [

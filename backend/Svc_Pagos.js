@@ -1287,6 +1287,18 @@ function _aplicarPagoParcialCore(ss, partidaId, montoCrudo, roles, catalogoVacio
   if (!partida.cuentaPago) {
     return { resultado: { status: 'error', message: 'No se puede aplicar pago sin capturar la cuenta de pago.' }, partidaIdCompletada: null };
   }
+  // Respaldo server-side (2026-08-02, mismo criterio que cuentaPago arriba
+  // -- el frontend ya bloquea esto en resolverAplicado, pero esta funcion
+  // es el UNICO nucleo real usado tanto por aplicarPagoParcial individual
+  // como por bulkResolverAplicado, asi que es el lugar correcto para que
+  // la regla no se pueda saltar llamando al backend directo). Sin TC,
+  // _montoEfectivoPartida (abajo) NO convierte el objetivo a MXN aunque
+  // monedaPagoReal diga 'MXN' -- se aplicaria dinero real contra un monto
+  // objetivo equivocado (el nominal en la moneda original, no el
+  // convertido) sin ningun aviso.
+  if (partida.monedaPagoReal === 'MXN' && !partida.tcAplicado) {
+    return { resultado: { status: 'error', message: 'La partida se marcó "MXN (acuerdo)" pero no tiene TC capturado -- captura el tipo de cambio antes de aplicar.' }, partidaIdCompletada: null };
+  }
 
   var monto = Number(montoCrudo);
   if (isNaN(monto) || monto <= 0) return { resultado: { status: 'error', message: 'El monto a aplicar debe ser mayor a cero.' }, partidaIdCompletada: null };
