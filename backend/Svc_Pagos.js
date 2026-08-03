@@ -1571,6 +1571,7 @@ function _leerCatCuentasPorUltimosDigitos(ss) {
   var iUlt = headers.indexOf('ULTIMOS_DIGITOS');
   var iCorto = headers.indexOf('NOMBRE_CORTO');
   var iSoc = headers.indexOf('NOMBRE_SOCIEDAD');
+  var iId = headers.indexOf('ID_SOCIEDAD');
   if (iCorto < 0) return [];
   return sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getValues()
     .filter(function (row) { return String(row[iCorto] || '').trim(); })
@@ -1578,34 +1579,66 @@ function _leerCatCuentasPorUltimosDigitos(ss) {
       return {
         ultimosDigitos: iUlt >= 0 ? String(row[iUlt] || '').trim() : '',
         nombreCorto: String(row[iCorto] || '').trim(),
-        nombreSociedad: iSoc >= 0 ? String(row[iSoc] || '').trim() : ''
+        nombreSociedad: iSoc >= 0 ? String(row[iSoc] || '').trim() : '',
+        // ID_SOCIEDAD agregado 2026-08-02: identificador de la SOCIEDAD
+        // (distinto de ULTIMOS_DIGITOS, que es de una CUENTA bancaria),
+        // ver _resolverSociedadDesdeNombreEmpresa estrategia 1.
+        idSociedad: iId >= 0 ? String(row[iId] || '').trim() : ''
       };
     });
 }
 
-/** El nombre trae el codigo pegado al final (ej. "Blau Life SAPI de CV
- * 8332") -- se extrae el numero final y se busca contra ULTIMOS_DIGITOS.
- * Nunca inventa una sociedad si no hay match.
+/** Quita diacriticos para comparar nombres de sociedad sin que un acento
+ * de mas o de menos rompa el match (2026-08-02, hallazgo real: "Acuario
+ * de Bajío" en el Excel vs "...BAJIO" sin acento en el catalogo/nombre
+ * bancario). Normaliza SOLO acentos -- nunca colapsa espacios dobles ni
+ * corrige palabras distintas (ej. "DEL" vs "DE" sigue sin matchear a
+ * propósito: es una discrepancia real de dato, no de formato, y no se
+ * debe adivinar). Mismo rango Unicode y misma tecnica de escape hex que
+ * _normalizarRol (arriba) -- no se reusa esa funcion directamente porque
+ * su nombre es especifico de roles y confundiria a quien lea este
+ * archivo, pero es el mismo patron ya probado, no uno nuevo inventado. */
+function _normalizarParaComparar(s) {
+  var SIN_ACENTOS = new RegExp(String.fromCharCode(91) + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + String.fromCharCode(93), 'g');
+  return String(s || '').trim().toUpperCase().normalize('NFD').replace(SIN_ACENTOS, '');
+}
+
+/** Resuelve la sociedad de una fila de propuesta contra CAT_CUENTAS_MAPEO,
+ * probando 3 estrategias en orden de confiabilidad. Nunca inventa una
+ * sociedad si no hay match -- cada estrategia que SI reconoce un patron
+ * pero no encuentra coincidencia devuelve null de inmediato (no cae a la
+ * siguiente estrategia "por si acaso"), para que un dato mal escrito
+ * siga siendo un error real y visible, nunca una sociedad equivocada
+ * elegida en silencio.
  *
- * Fallback por nombre completo (2026-08-02, pedido explicito del
- * usuario, caso real "Soccer Loco Holding" -- llega SIN numero al final
- * en el Excel real, a diferencia del resto de sociedades). Aplica a
- * CUALQUIER propuesta, no solo a esa sociedad: si "Nombre empresa" no
- * trae ningun numero al final, se compara contra NOMBRE_SOCIEDAD
- * (trim() de extremos + mayusculas -- NO colapsa espacios dobles
- * internos ni normaliza acentos; si eso llega a fallar para una
- * sociedad nueva, cae al mismo mensaje "no reconocida" de siempre, no
- * en silencio). Si SI trae numero pero
- * ese numero no matchea ningun ULTIMOS_DIGITOS, NO cae a este fallback
- * -- eso seguiria siendo "no reconocida" como antes (un numero
- * equivocado es una señal real de error, no debe enmascararse
- * intentando adivinar por nombre). Una sociedad real puede tener varias
- * filas/cuentas en el catalogo (ej. Soccer Loco: MXN/USD/nomina) --
- * todas comparten el mismo NOMBRE_CORTO, asi que basta la primera
- * coincidencia. */
+ * Estrategia 1 -- ID_SOCIEDAD puro (2026-08-02, pedido explicito del
+ * usuario tras el caso real "Acuario de Bajío"): si toda la celda
+ * "Nombre empresa" son solo digitos, es el identificador de la SOCIEDAD
+ * en el catalogo (distinto de ULTIMOS_DIGITOS, que es de una CUENTA
+ * bancaria) -- la forma mas confiable porque no depende de como este
+ * escrito el nombre. Es la forma PRINCIPAL recomendada hacia adelante;
+ * las estrategias 2 y 3 siguen funcionando como respaldo para propuestas
+ * que todavia no la usen.
+ *
+ * Estrategia 2 (preexistente) -- el nombre trae el codigo de CUENTA
+ * pegado al final (ej. "Blau Life SAPI de CV 8332") -- se busca contra
+ * ULTIMOS_DIGITOS.
+ *
+ * Estrategia 3 (preexistente, con acentos normalizados desde 2026-08-02)
+ * -- nombre completo de texto libre contra NOMBRE_SOCIEDAD, caso real
+ * "Soccer Loco Holding" (llega sin numero al final, a diferencia del
+ * resto). Una sociedad real puede tener varias filas/cuentas en el
+ * catalogo (ej. Soccer Loco: MXN/USD/nomina) -- todas comparten el mismo
+ * NOMBRE_CORTO, asi que basta la primera coincidencia en cualquier
+ * estrategia. */
 function _resolverSociedadDesdeNombreEmpresa(nombreEmpresa, catCuentas) {
   var nombreLimpio = String(nombreEmpresa || '').trim();
   if (!nombreLimpio) return null;
+
+  if (/^\d+$/.test(nombreLimpio)) {
+    var matchPorId = catCuentas.filter(function (c) { return c.idSociedad && c.idSociedad === nombreLimpio; })[0];
+    return matchPorId ? matchPorId.nombreCorto : null;
+  }
 
   var m = nombreLimpio.match(/(\d+)\s*$/);
   if (m) {
@@ -1614,8 +1647,8 @@ function _resolverSociedadDesdeNombreEmpresa(nombreEmpresa, catCuentas) {
     return matchPorCodigo ? matchPorCodigo.nombreCorto : null;
   }
 
-  var nombreUpper = nombreLimpio.toUpperCase();
-  var matchPorNombre = catCuentas.filter(function (c) { return c.nombreSociedad && c.nombreSociedad.toUpperCase() === nombreUpper; })[0];
+  var nombreNorm = _normalizarParaComparar(nombreLimpio);
+  var matchPorNombre = catCuentas.filter(function (c) { return c.nombreSociedad && _normalizarParaComparar(c.nombreSociedad) === nombreNorm; })[0];
   return matchPorNombre ? matchPorNombre.nombreCorto : null;
 }
 
@@ -1647,7 +1680,15 @@ function _uuidsExistentesEnPartidas(ss) {
  * SheetJS (readFileAsAllSheets) para carga-mov. No escribe nada, solo
  * arma la vista previa: propuestas candidatas agrupadas por sociedad
  * resuelta, mas errores por fila (nunca se descarta una fila en
- * silencio). */
+ * silencio).
+ *
+ * Procesa TODAS las hojas del archivo cuyo formato basico coincide
+ * (2026-08-02 -- antes se quedaba con la PRIMERA que matcheaba y
+ * descartaba el resto en silencio; un archivo real del usuario con 2
+ * hojas/2 sociedades perdia la segunda sin ningun aviso). Si una hoja
+ * candidata trae el formato basico pero le faltan columnas requeridas,
+ * se reporta como error de HOJA (no aborta las demas hojas validas del
+ * mismo archivo -- decision explicita del usuario). */
 function previsualizarPropuestaPago(sheets) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
@@ -1655,21 +1696,13 @@ function previsualizarPropuestaPago(sheets) {
     var catCuentas = _leerCatCuentasPorUltimosDigitos(ss);
     var uuidsExistentes = _uuidsExistentesEnPartidas(ss);
 
-    var hojaValida = null;
+    var candidatas = [];
     (sheets || []).forEach(function (s) {
-      if (hojaValida) return;
       var filas = Utilities.parseCsv(s.csv);
-      if (filas.length && _esHojaPropuestaConsolidada(filas[0])) hojaValida = { nombre: s.nombre, filas: filas };
+      if (filas.length && _esHojaPropuestaConsolidada(filas[0])) candidatas.push({ nombre: s.nombre, filas: filas });
     });
-    if (!hojaValida) {
+    if (!candidatas.length) {
       return { status: 'error', message: 'Ninguna hoja del archivo coincide con el formato esperado (columnas "Nombre empresa" / "Proveedor" / "Importe MXN"). Hojas en el archivo: ' + (sheets || []).map(function (s) { return s.nombre; }).join(', ') + '.' };
-    }
-
-    var headers = hojaValida.filas[0].map(function (h) { return String(h).trim(); });
-    var hi = {}; headers.forEach(function (h, i) { hi[h] = i; });
-    var faltantes = PROPUESTA_HEADERS_REQUERIDOS.filter(function (h) { return hi[h] === undefined; });
-    if (faltantes.length) {
-      return { status: 'error', message: 'La hoja "' + hojaValida.nombre + '" no trae las columnas: ' + faltantes.join(', ') + '. Encabezados encontrados: ' + headers.join(', ') };
     }
 
     var gruposPorSociedad = {};
@@ -1677,64 +1710,82 @@ function previsualizarPropuestaPago(sheets) {
     var erroresFila = [];
     var filasOmitidasSubtotal = 0;
     var totalFilasValidas = 0;
+    var hojasProcesadas = [];
+    // vistosEnPreview (2026-08-02): mismo motivo que vistosEnLote en
+    // confirmarCargaPropuestaPago -- con 2+ hojas ya siendo el flujo
+    // normal, un UUID repetido ENTRE hojas del mismo archivo debe verse
+    // marcado "duplicado" desde la vista previa, no solo al confirmar.
+    var vistosEnPreview = {};
 
-    hojaValida.filas.slice(1).forEach(function (fila, i) {
-      if (fila.every(function (v) { return v === ''; })) return;
-      var numFilaExcel = i + 2;
-
-      var nombreEmpresa = fila[hi['Nombre empresa']];
-      var proveedor = fila[hi['Proveedor']];
-      var nombreProveedor = fila[hi['Nombre del Proveedor']];
-      var esSubtotal = (!nombreEmpresa && !proveedor) || /TOTAL/i.test(nombreProveedor || '');
-      if (esSubtotal) { filasOmitidasSubtotal++; return; }
-
-      var mxn = _limpiarImporte(fila[hi['Importe MXN']]);
-      var usd = _limpiarImporte(fila[hi['Importe USD']]);
-      var gbp = _limpiarImporte(fila[hi['Importe GBP']]);
-      // 'Importe EUR' es opcional (ver comentario de PROPUESTA_HEADERS_REQUERIDOS)
-      // -- solo se lee si la columna existe en este archivo.
-      var eur = hi['Importe EUR'] !== undefined ? _limpiarImporte(fila[hi['Importe EUR']]) : 0;
-      var divisas = [];
-      if (mxn) divisas.push({ moneda: 'MXN', monto: mxn });
-      if (usd) divisas.push({ moneda: 'USD', monto: usd });
-      if (gbp) divisas.push({ moneda: 'GBP', monto: gbp });
-      if (eur) divisas.push({ moneda: 'EUR', monto: eur });
-
-      if (divisas.length === 0) {
-        erroresFila.push({ fila: numFilaExcel, motivo: 'Sin importe en MXN, USD, GBP ni EUR.' });
+    candidatas.forEach(function (hojaValida) {
+      var headers = hojaValida.filas[0].map(function (h) { return String(h).trim(); });
+      var hi = {}; headers.forEach(function (h, i) { hi[h] = i; });
+      var faltantes = PROPUESTA_HEADERS_REQUERIDOS.filter(function (h) { return hi[h] === undefined; });
+      if (faltantes.length) {
+        erroresFila.push({ hoja: hojaValida.nombre, fila: '-', motivo: 'La hoja no trae las columnas: ' + faltantes.join(', ') + '. Encabezados encontrados: ' + headers.join(', ') });
         return;
       }
-      if (divisas.length > 1) {
-        erroresFila.push({ fila: numFilaExcel, motivo: 'Trae importe en mas de una divisa a la vez (' + divisas.map(function (d) { return d.moneda; }).join(' + ') + ') -- no se puede determinar una sola moneda para esta linea.' });
-        return;
-      }
+      hojasProcesadas.push(hojaValida.nombre);
 
-      var nombreCorto = _resolverSociedadDesdeNombreEmpresa(nombreEmpresa, catCuentas);
-      if (!nombreCorto) {
-        erroresFila.push({ fila: numFilaExcel, motivo: 'Sociedad no reconocida en CAT_CUENTAS_MAPEO: "' + nombreEmpresa + '".' });
-        return;
-      }
+      hojaValida.filas.slice(1).forEach(function (fila, i) {
+        if (fila.every(function (v) { return v === ''; })) return;
+        var numFilaExcel = i + 2;
 
-      var uuid = fila[hi['UUID']] || '';
-      var linea = {
-        tempId: Utilities.getUuid(),
-        proveedor: nombreProveedor || '',
-        numeroProveedor: proveedor || '', // codigo SAP del proveedor (columna "Proveedor"), distinto del nombre -- antes nunca se capturaba
-        solicitante: fila[hi['Solicitante']] || '',
-        desc: fila[hi['Texto']] || '',
-        referencia: fila[hi['Referencia']] || '', // campo propio, ya no se mezcla con DESC (antes: Texto||Referencia perdia Referencia por completo si Texto venia lleno)
-        monto: divisas[0].monto,
-        moneda: divisas[0].moneda,
-        uuid: uuid,
-        rfc: fila[hi['RFC']] || '',
-        numeroDocumento: fila[hi['Nº documento']] || '',
-        duplicado: !!uuid && uuidsExistentes.indexOf(uuid) >= 0,
-        filaExcel: numFilaExcel
-      };
+        var nombreEmpresa = fila[hi['Nombre empresa']];
+        var proveedor = fila[hi['Proveedor']];
+        var nombreProveedor = fila[hi['Nombre del Proveedor']];
+        var esSubtotal = (!nombreEmpresa && !proveedor) || /TOTAL/i.test(nombreProveedor || '');
+        if (esSubtotal) { filasOmitidasSubtotal++; return; }
 
-      if (!gruposPorSociedad[nombreCorto]) { gruposPorSociedad[nombreCorto] = []; ordenSociedades.push(nombreCorto); }
-      gruposPorSociedad[nombreCorto].push(linea);
-      totalFilasValidas++;
+        var mxn = _limpiarImporte(fila[hi['Importe MXN']]);
+        var usd = _limpiarImporte(fila[hi['Importe USD']]);
+        var gbp = _limpiarImporte(fila[hi['Importe GBP']]);
+        // 'Importe EUR' es opcional (ver comentario de PROPUESTA_HEADERS_REQUERIDOS)
+        // -- solo se lee si la columna existe en este archivo.
+        var eur = hi['Importe EUR'] !== undefined ? _limpiarImporte(fila[hi['Importe EUR']]) : 0;
+        var divisas = [];
+        if (mxn) divisas.push({ moneda: 'MXN', monto: mxn });
+        if (usd) divisas.push({ moneda: 'USD', monto: usd });
+        if (gbp) divisas.push({ moneda: 'GBP', monto: gbp });
+        if (eur) divisas.push({ moneda: 'EUR', monto: eur });
+
+        if (divisas.length === 0) {
+          erroresFila.push({ hoja: hojaValida.nombre, fila: numFilaExcel, motivo: 'Sin importe en MXN, USD, GBP ni EUR.' });
+          return;
+        }
+        if (divisas.length > 1) {
+          erroresFila.push({ hoja: hojaValida.nombre, fila: numFilaExcel, motivo: 'Trae importe en mas de una divisa a la vez (' + divisas.map(function (d) { return d.moneda; }).join(' + ') + ') -- no se puede determinar una sola moneda para esta linea.' });
+          return;
+        }
+
+        var nombreCorto = _resolverSociedadDesdeNombreEmpresa(nombreEmpresa, catCuentas);
+        if (!nombreCorto) {
+          erroresFila.push({ hoja: hojaValida.nombre, fila: numFilaExcel, motivo: 'Sociedad no reconocida en CAT_CUENTAS_MAPEO: "' + nombreEmpresa + '".' });
+          return;
+        }
+
+        var uuid = fila[hi['UUID']] || '';
+        var linea = {
+          tempId: Utilities.getUuid(),
+          proveedor: nombreProveedor || '',
+          numeroProveedor: proveedor || '', // codigo SAP del proveedor (columna "Proveedor"), distinto del nombre -- antes nunca se capturaba
+          solicitante: fila[hi['Solicitante']] || '',
+          desc: fila[hi['Texto']] || '',
+          referencia: fila[hi['Referencia']] || '', // campo propio, ya no se mezcla con DESC (antes: Texto||Referencia perdia Referencia por completo si Texto venia lleno)
+          monto: divisas[0].monto,
+          moneda: divisas[0].moneda,
+          uuid: uuid,
+          rfc: fila[hi['RFC']] || '',
+          numeroDocumento: fila[hi['Nº documento']] || '',
+          duplicado: !!uuid && (uuidsExistentes.indexOf(uuid) >= 0 || !!vistosEnPreview[uuid]),
+          filaExcel: numFilaExcel
+        };
+        if (uuid) vistosEnPreview[uuid] = true;
+
+        if (!gruposPorSociedad[nombreCorto]) { gruposPorSociedad[nombreCorto] = []; ordenSociedades.push(nombreCorto); }
+        gruposPorSociedad[nombreCorto].push(linea);
+        totalFilasValidas++;
+      });
     });
 
     var propuestasPreview = ordenSociedades.sort().map(function (soc) {
@@ -1744,7 +1795,7 @@ function previsualizarPropuestaPago(sheets) {
     return {
       status: 'success',
       data: {
-        hoja: hojaValida.nombre,
+        hojas: hojasProcesadas,
         totalFilasValidas: totalFilasValidas,
         filasOmitidasSubtotal: filasOmitidasSubtotal,
         propuestasPreview: propuestasPreview,
@@ -1877,9 +1928,20 @@ function confirmarCargaPropuestaPago(payload) {
 
     var uuidsExistentes = _uuidsExistentesEnPartidas(ss);
     var uuidsDuplicados = [];
+    // vistosEnLote (2026-08-02): antes solo se comparaba contra UUIDs YA
+    // persistidos en PARTIDAS_PAGO -- un UUID repetido DENTRO del mismo
+    // lote (ej. 2 hojas del mismo archivo con la misma factura por error)
+    // pasaba sin detectarse, porque ninguna de las 2 existia aun en la
+    // hoja real al momento de comparar. Ahora se relevante porque cargar
+    // 2+ hojas a la vez ya es el flujo normal (ver multi-hoja arriba).
+    var vistosEnLote = {};
     (propuestasConfirmadas || []).forEach(function (grupo) {
       (grupo.lineas || []).forEach(function (l) {
-        if (l.uuid && uuidsExistentes.indexOf(l.uuid) >= 0) uuidsDuplicados.push(l.uuid + ' (' + (l.proveedor || '?') + ', ' + grupo.sociedad + ')');
+        if (!l.uuid) return;
+        if (uuidsExistentes.indexOf(l.uuid) >= 0 || vistosEnLote[l.uuid]) {
+          uuidsDuplicados.push(l.uuid + ' (' + (l.proveedor || '?') + ', ' + grupo.sociedad + ')');
+        }
+        vistosEnLote[l.uuid] = true;
       });
     });
     if (uuidsDuplicados.length && !forzarDuplicados) {

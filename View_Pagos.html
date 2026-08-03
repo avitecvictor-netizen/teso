@@ -1685,11 +1685,13 @@
       ]));
     } else {
       var pv = state.cargaPreview;
-      children.push(VEVA.dom.el('p', { class: 'text-[11.5px] text-[#697386]' }, ['Hoja "' + pv.hoja + '": ' + pv.totalFilasValidas + ' línea(s) válida(s)' + (pv.filasOmitidasSubtotal ? ', ' + pv.filasOmitidasSubtotal + ' fila(s) de subtotal omitidas' : '') + '.']));
+      if (pv.hojas && pv.hojas.length) {
+        children.push(VEVA.dom.el('p', { class: 'text-[11.5px] text-[#697386]' }, ['Hoja(s) "' + pv.hojas.join('", "') + '": ' + pv.totalFilasValidas + ' línea(s) válida(s)' + (pv.filasOmitidasSubtotal ? ', ' + pv.filasOmitidasSubtotal + ' fila(s) de subtotal omitidas' : '') + '.']));
+      }
       if (pv.erroresFila && pv.erroresFila.length) {
         children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 rounded-lg p-3 space-y-0.5' }, [
           VEVA.dom.el('p', { class: 'text-[11px] font-bold text-red-700 uppercase tracking-wide' }, [pv.erroresFila.length + ' fila(s) con error — no se importarán']),
-        ].concat(pv.erroresFila.map(function (e) { return VEVA.dom.el('p', { class: 'text-[11px] text-red-700' }, ['Fila ' + e.fila + ': ' + e.motivo]); }))));
+        ].concat(pv.erroresFila.map(function (e) { return VEVA.dom.el('p', { class: 'text-[11px] text-red-700' }, ['Hoja "' + e.hoja + '", fila ' + e.fila + ': ' + e.motivo]); }))));
       }
       children.push(VEVA.dom.el('div', { class: 'flex flex-col gap-2' }, pv.propuestasPreview.map(renderCargaGrupo)));
 

@@ -151,7 +151,16 @@
     ]);
   }
 
-  function td(content, extraClass) { return VEVA.dom.el('td', { class: 'px-2.5 py-1 text-[11px] whitespace-nowrap ' + (extraClass || '') }, [content == null ? '' : String(content)]); }
+  // content puede ser un Node (ej. el badge de Sociedad en renderFila) --
+  // antes se forzaba String(content) sin distinguir, y String(unNodoDOM)
+  // devuelve literalmente "[object HTMLSpanElement]" (hallazgo real
+  // reportado por el usuario, 2026-08-02). Mismo criterio que tdNum()
+  // abajo: si ya es un Node, se deja pasar tal cual -- VEVA.dom.el ya
+  // distingue string vs Node (Shared_Core.html).
+  function td(content, extraClass) {
+    var esNodo = content != null && typeof content === 'object' && typeof content.nodeType === 'number';
+    return VEVA.dom.el('td', { class: 'px-2.5 py-1 text-[11px] whitespace-nowrap ' + (extraClass || '') }, [esNodo ? content : (content == null ? '' : String(content))]);
+  }
   function tdNum(content) { return VEVA.dom.el('td', { class: 'px-2.5 py-1 text-[11px] whitespace-nowrap text-right font-mono' }, [content == null || content === '' ? VEVA.dom.el('span', { class: 'text-[#c3c9d3]' }, ['—']) : content]); }
 
   function renderFila(f) {
