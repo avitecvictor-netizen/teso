@@ -820,7 +820,7 @@ function enviarReportePosicion(payload) {
     var html = '<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;">'
       + '<div style="background:#0a2540;padding:24px 32px;border-radius:12px 12px 0 0;">'
       + '<span style="background:#635bff;color:#fff;font-weight:900;font-size:20px;padding:6px 14px;border-radius:8px;">V</span>'
-      + '<span style="color:#fff;font-weight:700;font-size:18px;margin-left:12px;">VEVA Enterprise</span>'
+      + '<span style="color:#fff;font-weight:700;font-size:18px;margin-left:12px;">Ventura Entertainment</span>'
       + '</div>'
       + '<div style="background:#fff;padding:24px 32px;border:1px solid #e6ebf1;border-top:none;">'
       + '<p style="font-size:14px;color:#697386;margin:0 0 4px;">Posicion Bancaria Consolidada &mdash; ' + scopeLabel + '</p>'
@@ -835,14 +835,14 @@ function enviarReportePosicion(payload) {
       + '</table>'
       + '</div>'
       + '<div style="background:#f6f9fc;padding:12px 32px;border:1px solid #e6ebf1;border-top:none;border-radius:0 0 12px 12px;">'
-      + '<p style="font-size:11px;color:#697386;margin:0;">Generado por VEVA Enterprise &mdash; '
+      + '<p style="font-size:11px;color:#697386;margin:0;">Generado por Ventura Entertainment &mdash; '
       + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm') + '</p>'
       + '</div>'
       + '</div>';
 
     MailApp.sendEmail({
       to:       destinatarios.join(','),
-      subject:  'VEVA | Posicion Bancaria ' + scopeLabel + ' \u2014 ' + d.fecha,
+      subject:  'Ventura Entertainment | Posicion Bancaria ' + scopeLabel + ' \u2014 ' + d.fecha,
       htmlBody: html
     });
 
