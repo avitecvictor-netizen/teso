@@ -93,6 +93,7 @@ function getBankingPosition(params) {
     Session.getActiveUser().getEmail();
 
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'posicion')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     // Fecha seleccionada como Date a medianoche local (sin fill-forward)
     var fechaSeleccionada = (params && params.fecha) ? _validateFecha(params.fecha) : null;
@@ -504,6 +505,7 @@ function previsualizarSaldos(payload) {
   try {
     Session.getActiveUser().getEmail();
     var ss     = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catMap = _buildCatalogMap(ss);
     var preview = [];
 
@@ -576,6 +578,7 @@ function guardarSaldosEnHistorial(payload) {
     Session.getActiveUser().getEmail();
 
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_POSICION_BANCARIA');
     if (!histSheet) {
       return { status: 'error', data: {}, message: 'Hoja HIST_POSICION_BANCARIA no encontrada' };
@@ -700,6 +703,7 @@ function getHistorialPosicion(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'reporte-fechas')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sheet = ss.getSheetByName('HIST_POSICION_BANCARIA');
     if (!sheet || sheet.getLastRow() <= 1) {
       return { status: 'success', data: [], message: 'Sin datos en historial' };
@@ -1889,6 +1893,7 @@ function previsualizarMovimientos(payload) {
   try {
     Session.getActiveUser().getEmail();
     var ss          = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catCuentas  = _buildCatCuentasArray(ss);
     var reglas      = _buildReglasArray(ss);
     var catClientes = _buildCatClientesArray(ss);
@@ -1955,6 +1960,7 @@ function cargarMovimientos(payload) {
   try {
     Session.getActiveUser().getEmail();
     ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var histSheet = _ensureHistMovSheet(ss);
     _ensureCatClientesSheet(ss);
@@ -2112,6 +2118,7 @@ function limpiarPeriodoMovimientos(payload) {
     lock.waitLock(30000);
     try {
       var ss  = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var tz  = Session.getScriptTimeZone();
       var todo = payload && payload.todo === true;
       var desde = '', hasta = '';
@@ -2212,6 +2219,7 @@ function getMovimientos(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'clasificador')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'success', data: { rows: [], total: 0, paginas: 0 }, message: '' };
@@ -2322,6 +2330,7 @@ function clasificarMovimientos(payload) {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'clasificador')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'error', data: {}, message: 'HIST_MOVIMIENTOS vacia o no existe' };
@@ -2395,6 +2404,7 @@ function sincronizarCobranzaHist() {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'success', data: { actualizados: 0 }, message: 'HIST_MOVIMIENTOS vacia' };
@@ -2453,6 +2463,7 @@ function sincronizarTransferenciasHist() {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'success', data: { pares: 0 }, message: 'HIST_MOVIMIENTOS vacia' };
@@ -2515,6 +2526,7 @@ function getCuadre(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss       = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'validacion')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sumSheet = ss.getSheetByName('SUM_MOV');
     if (!sumSheet || sumSheet.getLastRow() <= 1) {
       return { status: 'success', data: [], message: 'SUM_MOV sin datos — cargar movimientos primero' };
@@ -2608,6 +2620,7 @@ function getCobranza(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'cobranza')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'success', data: { registros: [], total: 0, porSociedad: [], tcUsd: 1 }, message: '' };
@@ -2719,6 +2732,7 @@ function getConciliacion(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss        = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'conciliacion')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
     if (!histSheet || histSheet.getLastRow() <= 1) {
       return { status: 'success', data: { filas: [], periodos: [], sinMovimientos: [] }, message: '' };
@@ -2911,6 +2925,7 @@ function recalcularSumPeriodos(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var rawPeriodos = (params && Array.isArray(params.periodos)) ? params.periodos : [];
     if (!rawPeriodos.length) return { status: 'error', data: {}, message: 'Se requiere al menos un periodo YYYY-MM' };
@@ -2978,6 +2993,7 @@ function recalcularMovPeriodos(params) {
       return { status: 'error', data: {}, message: 'Se requiere desde y hasta (YYYY-MM)' };
 
     var ss          = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catCuentas  = _buildCatCuentasArray(ss);
     var reglas      = _buildReglasArray(ss);
     var catClientes = _buildCatClientesArray(ss);
@@ -3054,6 +3070,7 @@ function generarHojaAuditoria() {
   try {
     Session.getActiveUser().getEmail();
     var ss     = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catMap = _buildCatalogMap(ss);
 
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
@@ -3151,6 +3168,7 @@ function generarHojaAuditoriaCobranza() {
   try {
     Session.getActiveUser().getEmail();
     var ss     = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'carga-mov')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catMap = _buildCatalogMap(ss);
 
     var histSheet = ss.getSheetByName('HIST_MOVIMIENTOS');
@@ -3251,6 +3269,7 @@ function saveAssetRequest(data) {
       // standalone ejecutado como app web (sin hoja contenedora) -- la
       // funcion fallaba siempre. Usa la misma BD que el resto del backend.
       var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'solicitud')) return { success: false, error: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var sheet = ss.getSheetByName('SolicitudesAF') || ss.insertSheet('SolicitudesAF');
       if (sheet.getLastRow() === 0) {
         sheet.appendRow(['Fecha', 'Folio', 'Tipo', 'Sociedad', 'Monto', 'Moneda', 'Descripcion', 'Justificacion']);

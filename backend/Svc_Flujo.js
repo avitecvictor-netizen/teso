@@ -87,6 +87,7 @@ function getFlujoEfectivo(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'flujo-efectivo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var desde = params && params.desde ? String(params.desde).trim() : '';
     var hasta = params && params.hasta ? String(params.hasta).trim() : '';
@@ -310,6 +311,7 @@ function getMovimientosDetalle(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss       = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'flujo-efectivo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var desde    = params && params.desde    ? String(params.desde).trim()    : '';
     var hasta    = params && params.hasta    ? String(params.hasta).trim()    : '';
     var clasif2  = params && params.clasif2  ? String(params.clasif2).trim()  : '';
@@ -424,6 +426,7 @@ function getSaldoInicialAdmin(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss      = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var siSheet = _ensureSaldoInicialSheet(ss);
     if (siSheet.getLastRow() <= 1) return { status: 'success', data: [], message: '' };
 
@@ -461,6 +464,7 @@ function setSaldoInicial(payload) {
     lock.waitLock(15000);
     try {
       var ss      = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var siSheet = _ensureSaldoInicialSheet(ss);
       var cuenta  = String(payload.cuenta  || '').trim();
       var periodo = String(payload.periodo || '').trim().slice(0, 7);
@@ -514,6 +518,7 @@ function bloquearPeriodoSaldo(payload) {
     lock.waitLock(15000);
     try {
       var ss      = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var siSheet = _ensureSaldoInicialSheet(ss);
       var periodo = String(payload && payload.periodo || '').trim().slice(0, 7);
       if (!periodo) return { status: 'error', data: {}, message: 'periodo requerido' };

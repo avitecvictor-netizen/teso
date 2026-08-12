@@ -13,6 +13,7 @@ function getMapeoFlujo() {
   try {
     Session.getActiveUser().getEmail();
     var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sheet = _ensureMapeoFlujoSheet(ss);
     if (sheet.getLastRow() <= 1) return { status: 'success', data: [], message: '' };
 
@@ -51,6 +52,7 @@ function saveMapeoFlujoItem(payload) {
     lock.waitLock(15000);
     try {
       var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var sheet = _ensureMapeoFlujoSheet(ss);
       var tipo  = String(payload.tipo           || '').trim();
       var clasif = String(payload.clasificacion  || '').trim();
@@ -91,6 +93,7 @@ function deleteMapeoFlujoItem(payload) {
     lock.waitLock(15000);
     try {
       var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var sheet = _ensureMapeoFlujoSheet(ss);
       if (sheet.getLastRow() <= 1) return { status: 'success', data: {}, message: 'Sin datos' };
 
@@ -125,6 +128,7 @@ function getCatCuentasAdmin() {
   try {
     Session.getActiveUser().getEmail();
     var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sheet = ss.getSheetByName('CAT_CUENTAS_MAPEO');
     if (!sheet || sheet.getLastRow() <= 1) return { status: 'success', data: [], message: '' };
 
@@ -180,6 +184,7 @@ function saveCatCuenta(payload) {
     lock.waitLock(15000);
     try {
       var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var sheet = ss.getSheetByName('CAT_CUENTAS_MAPEO');
       if (!sheet) return { status: 'error', data: {}, message: 'CAT_CUENTAS_MAPEO no existe' };
 
@@ -246,6 +251,7 @@ function deleteCatCuenta(payload) {
     lock.waitLock(15000);
     try {
       var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+      if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
       var sheet = ss.getSheetByName('CAT_CUENTAS_MAPEO');
       if (!sheet || sheet.getLastRow() <= 1) return { status: 'success', data: {}, message: 'Sin datos' };
 

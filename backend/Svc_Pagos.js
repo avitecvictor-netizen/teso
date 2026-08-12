@@ -3333,7 +3333,7 @@ function _tcDelDiaOrNull(ss, fechaDate) {
 function getHistoricoPagos(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'historico-pagos')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var aplicaciones = _pagoSheetToObjects(_ensureAplicacionesPagoSheet(ss), APLICACIONES_PAGO_HEADERS);
     if (!aplicaciones.length) return { status: 'success', data: [], message: '' };

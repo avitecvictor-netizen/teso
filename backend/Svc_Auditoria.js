@@ -16,6 +16,7 @@ function getCadenaSaldos(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var desde    = params && params.desde    ? String(params.desde).trim().slice(0, 7)    : '';
     var hasta    = params && params.hasta    ? String(params.hasta).trim().slice(0, 7)    : '';
@@ -126,6 +127,7 @@ function validarCadenaSaldos(params) {
   try {
     Session.getActiveUser().getEmail();
     var ss  = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'admin-flujo')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var per = params && params.periodo ? String(params.periodo).trim().slice(0, 7) : '';
     if (!per) return { status: 'error', data: [], message: 'Se requiere periodo YYYY-MM' };
 
