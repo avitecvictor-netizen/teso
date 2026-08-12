@@ -773,6 +773,10 @@ function getListaDistribucion() {
   try {
     Session.getActiveUser().getEmail();
     var ss      = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    // Control de acceso por vista, Bloque 2 (2026-08-10): igual que
+    // enviarReportePosicion, esta funcion sirve Lista de Distribucion --
+    // restringida a administradores de CONFIG_TESORERIA.
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
     var sheet   = _getOrCreateDistSheet(ss);
     var lastRow = sheet.getLastRow();
     if (lastRow <= 1) return { status: 'success', data: [], message: '' };
@@ -803,6 +807,7 @@ function guardarListaDistribucion(payload) {
   try {
     Session.getActiveUser().getEmail();
     var ss    = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
     var sheet = _getOrCreateDistSheet(ss);
 
     var lastRow = sheet.getLastRow();
@@ -831,6 +836,15 @@ function guardarListaDistribucion(payload) {
 function enviarReportePosicion(payload) {
   try {
     Session.getActiveUser().getEmail();
+    // Control de acceso por vista, Bloque 2 (2026-08-10): esta funcion
+    // sirve la tab "Reporte de Posicion" de Lista de Distribucion --
+    // restringida a los administradores de CONFIG_TESORERIA, no por rol.
+    // Antes NO tenia ningun control de acceso real (el Session.getActiveUser
+    // de arriba solo forzaba la autenticacion, nunca se usaba para
+    // autorizar). ss se abre aqui (antes se abria mas abajo, solo para
+    // leer la config del remitente) para poder gatear desde el principio.
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
 
     var scope         = payload.scope         || 'actual';
     var destinatarios = payload.destinatarios || [];
@@ -914,7 +928,6 @@ function enviarReportePosicion(payload) {
     // quien ejecuta el envio (executeAs:USER_ACCESSING) -- responsabilidad
     // de quien configure el valor, el codigo no puede validarlo de
     // antemano.
-    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
     var configTesoreria = _leerConfigTesoreria(ss);
     GmailApp.sendEmail(destinatarios.join(','), 'Tesorer\u00eda VLMM | Posicion Bancaria ' + scopeLabel + ' \u2014 ' + d.fecha, '', {
       htmlBody: html,

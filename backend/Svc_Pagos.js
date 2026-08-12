@@ -599,7 +599,7 @@ function _remitenteParaTransicion(ss, transicion) {
 function getConfigTesoreria() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
     var config = _leerConfigTesoreria(ss);
     return { status: 'success', data: { emailTesoreria: config.emailTesoreria, admins: config.admins, esAdmin: _esAdminTesoreria(ss) }, message: '' };
   } catch (e) {
@@ -617,8 +617,12 @@ function guardarConfigTesoreria(payload) {
   lock.waitLock(30000);
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
-    if (!_esAdminTesoreria(ss)) return { status: 'error', data: {}, message: 'Solo un administrador de Tesorería puede editar esto.' };
+    // Control de acceso por vista, Bloque 2 (2026-08-10): _tieneAccesoAVista(ss,
+    // 'lista-dist') ES _esAdminTesoreria(ss) (ver VISTAS_SOLO_ADMIN_TESORERIA,
+    // Codigo.js) -- se dejo un solo chequeo en vez de 2 identicos duplicados
+    // (antes de este bloque, esta funcion ya llamaba _esAdminTesoreria aparte,
+    // ahora redundante con el gate de vista).
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: {}, message: 'Solo un administrador de Tesorería puede editar esto.' };
 
     var emailNuevo = String(payload.emailTesoreria || '').trim();
     if (!emailNuevo || emailNuevo.indexOf('@') < 0) return { status: 'error', data: {}, message: 'Correo de tesorería inválido.' };
@@ -3125,7 +3129,7 @@ function _enviarCorreoNotificacionPagoUnica(ss, sociedad, transicion, items, ema
 function getListaNotificacionesPago() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'notificaciones-pagos')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
     var lista = _pagoSheetToObjects(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS);
     return { status: 'success', data: lista, message: '' };
   } catch (e) {
@@ -3133,13 +3137,6 @@ function getListaNotificacionesPago() {
   }
 }
 
-/** payload = { sociedad, lista:[{email,nombre,activo}] }. Reemplaza SOLO
- * las filas de esa sociedad -- nunca borra la configuracion de las
- * demas (a diferencia de guardarListaDistribucion en Codigo.js, que
- * reescribe la hoja completa porque esa lista es unica/global; aqui hay
- * multiples sociedades compartiendo la misma hoja). Gateado igual que
- * conciliar/subir comprobantes (Tesoreria+Contador) -- reusa
- * _puedeConciliarOComprobantes tal cual, no se inventa un gate paralelo. */
 /** Reemplaza SOLO las filas de una sociedad en una hoja tipo "lista de
  * correos por sociedad" (shape SOCIEDAD/EMAIL/NOMBRE/ACTIVO/FECHA_ALTA)
  * -- helper compartido por guardarListaNotificacionesPago (el TO) y
@@ -3178,7 +3175,11 @@ function guardarListaNotificacionesPago(payload) {
   try {
     lock.waitLock(30000);
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_puedeConciliarOComprobantes(ss)) return { status: 'error', message: 'No tienes permiso para editar la lista de notificaciones.' };
+    // Control de acceso por vista, Bloque 2 (2026-08-10): antes Tesoreria
+    // O Contador podian editar -- ahora solo administradores de
+    // CONFIG_TESORERIA (decision explicita del usuario, esta vista es
+    // solo-admin, no por rol).
+    if (!_tieneAccesoAVista(ss, 'notificaciones-pagos')) return { status: 'error', message: 'No tienes permiso para editar la lista de notificaciones.' };
     if (!payload.sociedad) return { status: 'error', message: 'Falta la sociedad.' };
 
     var guardados = _guardarListaPorSociedad(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS, payload.sociedad, payload.lista);
@@ -3193,13 +3194,16 @@ function guardarListaNotificacionesPago(payload) {
 /** getListaCcPagos/guardarListaCcPagos (Bloque E, 2026-07-27): mismo
  * patron exacto que getListaNotificacionesPago/guardarListaNotificacionesPago
  * -- unica diferencia real es la hoja/headers (CONFIG_CC_PAGOS en vez de
- * CONFIG_NOTIFICACIONES_PAGOS) y que esta lista es CC, no TO. Mismo gate
- * (Tesoreria+Contador, _puedeConciliarOComprobantes) por consistencia
- * con el resto del modulo -- no se inventa un gate paralelo. */
+ * CONFIG_NOTIFICACIONES_PAGOS) y que esta lista es CC, no TO. Gate
+ * actualizado 2026-08-10 (control de acceso por vista, Bloque 2): ya NO
+ * es Tesoreria+Contador (_puedeConciliarOComprobantes) -- ahora es
+ * _tieneAccesoAVista(ss,'lista-dist'), que resuelve a solo los
+ * administradores de CONFIG_TESORERIA (decision explicita del usuario,
+ * esta vista completa quedo restringida a esa allowlist, no por rol). */
 function getListaCcPagos() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
     var lista = _pagoSheetToObjects(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS);
     return { status: 'success', data: lista, message: '' };
   } catch (e) {
@@ -3212,7 +3216,11 @@ function guardarListaCcPagos(payload) {
   try {
     lock.waitLock(30000);
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_puedeConciliarOComprobantes(ss)) return { status: 'error', message: 'No tienes permiso para editar la lista de CC de pagos.' };
+    // Control de acceso por vista, Bloque 2 (2026-08-10): antes Tesoreria
+    // O Contador podian editar -- ahora solo administradores de
+    // CONFIG_TESORERIA (decision explicita del usuario, esta vista es
+    // solo-admin, no por rol).
+    if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', message: 'No tienes permiso para editar la lista de CC de pagos.' };
     if (!payload.sociedad) return { status: 'error', message: 'Falta la sociedad.' };
 
     var guardados = _guardarListaPorSociedad(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS, payload.sociedad, payload.lista);
