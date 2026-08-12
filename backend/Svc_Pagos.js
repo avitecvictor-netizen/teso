@@ -899,11 +899,28 @@ function getUsuarioActual() {
     var propios = usuarios.filter(function (u) { return u.email === email && _esActivo(u.activo); });
     var todasLasVistas = Object.keys(VISTA_ROLES_PERMITIDOS).concat(VISTAS_SOLO_ADMIN_TESORERIA);
     var vistasPermitidas = todasLasVistas.filter(function (v) { return _tieneAccesoAVista(ss, v); });
+    // Nombre real (2026-08-12, pedido pendiente desde la ronda 2026-07-28):
+    // antes el header solo mostraba el email crudo -- ni siquiera usaba
+    // este mismo campo `nombre` (de CAT_USUARIOS) que ya se devolvia.
+    // Prioridad: (1) People API self-lookup ('people/me', mismo servicio
+    // avanzado ya usado en buscarContactosDirectorio, misma politica de
+    // degradar sin tronar si falla el permiso/cuota) -- funciona para
+    // CUALQUIER usuario del dominio sin captura manual; (2) NOMBRE de
+    // CAT_USUARIOS si el paso 1 no devolvio nada; (3) el email crudo como
+    // ultimo recurso, nunca dejar el campo vacio en el frontend.
+    var nombreReal = '';
+    try {
+      var yo = People.People.get('people/me', { personFields: 'names' });
+      nombreReal = (yo && yo.names && yo.names[0] && yo.names[0].displayName) || '';
+    } catch (ePeople) {
+      Logger.log('getUsuarioActual: People.People.get(people/me) fallo, se usa respaldo de CAT_USUARIOS/email: ' + ePeople.toString());
+    }
+    if (!nombreReal) nombreReal = propios.length ? propios[0].nombre : '';
     return {
       status: 'success',
       data: {
         email: email,
-        nombre: propios.length ? propios[0].nombre : '',
+        nombre: nombreReal,
         roles: propios.map(function (u) { return u.rol; }),
         catalogoVacio: usuarios.length === 0,
         vistasPermitidas: vistasPermitidas

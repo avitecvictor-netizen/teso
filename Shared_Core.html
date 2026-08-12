@@ -426,7 +426,12 @@ function vevaCargarUsuarioHeader() {
         VEVA.vistasPermitidasError = (res && res.message) || 'No se pudo verificar tu acceso.';
         return;
       }
-      if (nombreEl) nombreEl.textContent = res.data.email;
+      // Nombre real (2026-08-12): antes se mostraba siempre el email
+      // crudo, aunque el backend ya devolviera `nombre` (People API o
+      // CAT_USUARIOS, ver getUsuarioActual). Si por algun motivo llega
+      // vacio (fallo de People API Y sin fila en CAT_USUARIOS), se cae
+      // al email tal cual -- nunca queda el header en blanco.
+      if (nombreEl) nombreEl.textContent = res.data.nombre || res.data.email;
       if (rolEl) rolEl.textContent = (res.data.roles && res.data.roles.length) ? res.data.roles.join(' · ') : 'Sin rol asignado';
       VEVA.vistasPermitidas = res.data.vistasPermitidas || [];
       VEVA.vistasPermitidasError = null;

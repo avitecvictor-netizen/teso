@@ -8,11 +8,11 @@ var SALDOS_SHEET_ID = '1-DzPpYYViWVG0RHuGGldkDo4LUyYcCLAjQOIlp2DdS8'; // BD_TESO
 function doGet() {
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
-    // TODO pendiente (encontrado 2026-08-10, fuera de alcance de la tarea
-    // en curso -- no tocar aqui): este setTitle sigue diciendo "VEVA",
-    // pisando el <title> ya rebrandeado a "Tesoreria VLMM" dentro de
-    // Index_1.html. Corregir en una ronda aparte.
-    .setTitle('VEVA - Gestion Corporativa')
+    // Corregido 2026-08-12 (pendiente desde el rebranding del 2026-08-10):
+    // este setTitle pisaba el <title> ya rebrandeado dentro de
+    // Index_1.html -- el titulo de la pestana del navegador seguia
+    // diciendo "VEVA" pase lo que pase.
+    .setTitle('Tesorería VLMM')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
