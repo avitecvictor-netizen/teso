@@ -2022,6 +2022,14 @@ function buscarContactosDirectorio(payload) {
   var query = String((payload && payload.query) || '').trim();
   if (query.length < 3) return { status: 'success', data: [], message: '' };
   try {
+    // Control de acceso por vista (2026-08-12, hallazgo de auditoria
+    // post-Bloque 3): esta funcion no tenia NINGUN gate -- cualquiera con
+    // acceso al dominio (ni siquiera con fila en CAT_USUARIOS) podia
+    // llamarla directo y obtener nombres/emails del directorio. Se llama
+    // SOLO desde View_Pagos.html (agregar CC extra a una propuesta), asi
+    // que se gatea igual que el resto de ese modulo.
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var res = People.People.searchDirectoryPeople({
       query: query,
       readMask: 'names,emailAddresses',
