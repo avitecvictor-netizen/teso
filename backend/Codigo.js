@@ -8,6 +8,10 @@ var SALDOS_SHEET_ID = '1-DzPpYYViWVG0RHuGGldkDo4LUyYcCLAjQOIlp2DdS8'; // BD_TESO
 function doGet() {
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
+    // TODO pendiente (encontrado 2026-08-10, fuera de alcance de la tarea
+    // en curso -- no tocar aqui): este setTitle sigue diciendo "VEVA",
+    // pisando el <title> ya rebrandeado a "Tesoreria VLMM" dentro de
+    // Index_1.html. Corregir en una ronda aparte.
     .setTitle('VEVA - Gestion Corporativa')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
@@ -15,6 +19,69 @@ function doGet() {
 
 function include(filename) {
   return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+// =============================================
+// CONTROL DE ACCESO POR VISTA (2026-08-10)
+// =============================================
+// Bloque 1 de 3 (plan aprobado por el usuario, ver PROJECT_STATUS.md):
+// mecanismo central + Pagos. Los Bloques 2 (Lista de Distribucion /
+// Notificaciones de Pagos, solo administradores) y 3 (las demas vistas)
+// se implementan en rondas separadas, cada una con su propio
+// revisor/qa/deploy -- el volumen total (~55-60 funciones) es demasiado
+// grande para un solo diff seguro de revisar.
+//
+// Reusa las funciones de rol/admin YA existentes en Svc_Pagos.js
+// (_tieneAlgunRol, _esAdminTesoreria, ROL_TESORERIA, ROL_CONTADOR) --
+// Apps Script comparte namespace global entre archivos del mismo
+// proyecto, no hace falta mover nada (mismo patron ya usado: este mismo
+// archivo define SALDOS_SHEET_ID y Svc_Pagos.js ya lo consume sin
+// import explicito).
+//
+// A diferencia de _tieneAccesoValido (falla ABIERTO si CAT_USUARIOS esta
+// vacio, para no bloquear el primer despliegue del modulo Pagos original),
+// este control de VISTAS es explicitamente FALL-CLOSED (decision directa
+// del usuario, 2026-08-10): si el catalogo esta vacio o el usuario no
+// tiene ninguno de los roles esperados, no ve la vista. _tieneAlgunRol ya
+// se comporta asi de forma nativa (sin ningun wrapper que "abra" el
+// acceso), asi que basta con llamarla directo, sin replicar el criterio
+// fail-open de otras partes del modulo.
+var VISTA_ROLES_PERMITIDOS = {
+  'posicion': ['Tesorería'],
+  'cobranza': ['Tesorería'],
+  'reporte-fechas': ['Tesorería'],
+  'carga-mov': ['Tesorería'],
+  'clasificador': ['Tesorería'],
+  'conciliacion': ['Tesorería'],
+  'validacion': ['Tesorería'],
+  'flujo-efectivo': ['Tesorería'],
+  'historico-pagos': ['Tesorería'],
+  'admin-flujo': ['Tesorería'],
+  'workflow-pagos': ['Tesorería', 'Contador', 'Solicitante'],
+  'solicitud': ['Tesorería', 'Solicitante']
+};
+
+// Lista-dist (Lista de Distribucion, incluye "Reporte de Posicion" y
+// "CC de Pagos") y notificaciones-pagos: NO se gatean por rol -- quedan
+// restringidas a la MISMA allowlist de administradores ya construida
+// para CONFIG_TESORERIA (_esAdminTesoreria, Svc_Pagos.js), reusada tal
+// cual por decision explicita del usuario en vez de crear una lista
+// nueva. Esto es una reduccion real de acceso respecto a hoy: Tesoreria
+// Y Contador dejan de poder editar CC de Pagos/Notificaciones, salvo que
+// ademas esten en ADMINS_TESORERIA.
+var VISTAS_SOLO_ADMIN_TESORERIA = ['lista-dist', 'notificaciones-pagos'];
+
+/** Unico punto de verdad para "¿puede este usuario ver esta vista?" --
+ * usado tanto para filtrar el menu (getUsuarioActual) como para el gate
+ * real server-side de cada funcion de backend que sirve esa vista. Una
+ * vista NO mapeada en ninguna de las 2 listas de arriba se deniega
+ * (fail-closed tambien para vistas desconocidas -- evita que una vista
+ * nueva quede sin control por simple olvido de agregarla al mapa). */
+function _tieneAccesoAVista(ss, vistaId) {
+  if (VISTAS_SOLO_ADMIN_TESORERIA.indexOf(vistaId) >= 0) return _esAdminTesoreria(ss);
+  var roles = VISTA_ROLES_PERMITIDOS[vistaId];
+  if (!roles) return false;
+  return _tieneAlgunRol(ss, roles);
 }
 
 // =============================================

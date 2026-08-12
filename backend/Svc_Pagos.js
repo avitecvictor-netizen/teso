@@ -880,19 +880,29 @@ function _tieneAlgunRol(ss, rolesEsperados) {
  * "roles[0]" -- eso reintroduciria el mismo bug que se esta corrigiendo
  * (asumir un solo rol "principal" arbitrario). Todo consumidor de este
  * campo debe revisar el array completo. */
+/** vistasPermitidas (2026-08-10, control de acceso por vista, Bloque 1
+ * de 3): calculado 100% server-side via _tieneAccesoAVista (Codigo.js)
+ * -- el cliente nunca decide que puede ver, solo filtra el menu con lo
+ * que este array ya trae. Recorre TODAS las vistas mapeadas (por rol +
+ * las de solo-administrador) de una sola vez; una vista sin mapear
+ * jamas aparece aqui (fail-closed, ver comentario de
+ * VISTA_ROLES_PERMITIDOS). */
 function getUsuarioActual() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var email = Session.getActiveUser().getEmail();
     var propios = usuarios.filter(function (u) { return u.email === email && _esActivo(u.activo); });
+    var todasLasVistas = Object.keys(VISTA_ROLES_PERMITIDOS).concat(VISTAS_SOLO_ADMIN_TESORERIA);
+    var vistasPermitidas = todasLasVistas.filter(function (v) { return _tieneAccesoAVista(ss, v); });
     return {
       status: 'success',
       data: {
         email: email,
         nombre: propios.length ? propios[0].nombre : '',
         roles: propios.map(function (u) { return u.rol; }),
-        catalogoVacio: usuarios.length === 0
+        catalogoVacio: usuarios.length === 0,
+        vistasPermitidas: vistasPermitidas
       },
       message: ''
     };
@@ -939,7 +949,7 @@ function _fechaCaducidad(fechaCarga) {
 function getPropuestasPago() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) {
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) {
       return { status: 'sin_acceso', data: [], message: 'Tu cuenta no está registrada con un rol activo en CAT_USUARIOS. Contacta a finanzas para que te den de alta.' };
     }
     var propSheet = _ensurePropuestasPagoSheet(ss);
@@ -1257,7 +1267,7 @@ function _updatePartidaPagoRow(sheet, partidaId, patch, roles, catalogoVacio, ss
 function updatePartidaPago(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var res = _updatePartidaPagoRow(_ensurePartidasPagoSheet(ss), payload.partidaId, payload.patch, _rolesUsuarioActual(ss), usuarios.length === 0, ss);
     if (!res.ok) return { status: 'error', message: res.message };
@@ -1277,7 +1287,7 @@ function updatePartidaPago(payload) {
 function bulkUpdatePartidasPago(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sheet = _ensurePartidasPagoSheet(ss);
     // roles/catalogoVacio se calculan UNA vez para todo el lote (no por
     // partida dentro del forEach) -- releer CAT_USUARIOS en cada
@@ -1314,7 +1324,7 @@ function bulkUpdatePartidasPago(payload) {
 function setPartidasPagoChecked(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var sheet = _ensurePartidasPagoSheet(ss);
     // { checked } no dispara ningun gate de rol en _validarTransicionPermitida
     // (fuera de alcance a proposito, igual que en el frontend) -- se
@@ -1340,7 +1350,7 @@ function setPartidasPagoChecked(payload) {
 function solicitarReactivacion(partidaId) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     // Hallazgo real de `revisor` (2026-07-27): la reactivacion instantanea
     // ahora tiene gate propio dentro de _validarTransicionPermitida (solo
     // Tesoreria) -- hay que calcular roles/catalogoVacio aqui igual que
@@ -1506,7 +1516,7 @@ function aplicarPagoParcial(payload) {
   try {
     lock.waitLock(30000);
     ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var catalogoVacio = usuarios.length === 0;
@@ -1553,7 +1563,7 @@ function aplicarPagoParcial(payload) {
 function bulkResolverAplicado(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var catalogoVacio = usuarios.length === 0;
@@ -1622,7 +1632,7 @@ function bulkResolverAplicado(payload) {
 function bulkResolverBanca(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
 
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var catalogoVacio = usuarios.length === 0;
@@ -1842,7 +1852,7 @@ function _uuidsExistentesEnPartidas(ss) {
 function previsualizarPropuestaPago(sheets) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var catCuentas = _leerCatCuentasPorUltimosDigitos(ss);
     var uuidsExistentes = _uuidsExistentesEnPartidas(ss);
 
@@ -2072,7 +2082,7 @@ function confirmarCargaPropuestaPago(payload) {
   try {
     lock.waitLock(30000);
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var propSheet = _ensurePropuestasPagoSheet(ss);
     var lineSheet = _ensurePartidasPagoSheet(ss);
 
@@ -2337,7 +2347,7 @@ function _saldoMasRecientePorCuenta(ss) {
 function getConciliacionPagos() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: { partidas: [], saldoPorCuenta: {} }, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', data: { partidas: [], saldoPorCuenta: {} }, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var propRows = _pagoSheetToObjects(_ensurePropuestasPagoSheet(ss), PROPUESTAS_PAGO_HEADERS);
     var propById = {};
     propRows.forEach(function (p) { propById[p.id] = p; });
@@ -2420,7 +2430,7 @@ function getConciliacionPagos() {
 function buscarCandidatosMovimiento(payload) {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: { candidatos: [] }, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', data: { candidatos: [] }, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var partidas = _pagoSheetToObjects(_ensurePartidasPagoSheet(ss), PARTIDAS_PAGO_HEADERS);
     var partida = partidas.filter(function (p) { return p.id === payload.partidaId; })[0];
     if (!partida) return { status: 'error', message: 'Partida no encontrada: ' + payload.partidaId };
@@ -2602,7 +2612,7 @@ function desconciliarPartida(payload) {
 function getComprobantesPago() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
-    if (!_tieneAccesoValido(ss)) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_tieneAccesoAVista(ss, 'workflow-pagos')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
     var propRows = _pagoSheetToObjects(_ensurePropuestasPagoSheet(ss), PROPUESTAS_PAGO_HEADERS);
     var propById = {};
     propRows.forEach(function (p) { propById[p.id] = p; });

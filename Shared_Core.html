@@ -277,8 +277,23 @@ VEVA.router = (function () {
       btn.classList.toggle('text-[#635bff]', active);
       btn.classList.toggle('text-[#424770]', !active);
     });
-    var view = VEVA.views[viewId];
     current = viewId;
+    // Control de acceso por vista (2026-08-10, Bloque 1 de 3): VEVA.vistasPermitidas
+    // se llena UNA vez, antes de la primera navegacion (ver DOMContentLoaded al
+    // final de este archivo) -- nunca queda undefined en el momento en que go()
+    // puede ser llamado por un click real del usuario. Si viewId no esta en la
+    // lista, jamas se monta la vista real (ni siquiera el registerView existe
+    // para el, el chequeo va primero) -- navegar a mano por consola a un id
+    // fuera de lo permitido tampoco sirve de nada, el gate real ademas vive en
+    // cada funcion de backend.
+    if (VEVA.vistasPermitidas && VEVA.vistasPermitidas.indexOf(viewId) < 0) {
+      mount.appendChild(VEVA.dom.el('div', { class: 'flex flex-col items-center justify-center py-20 text-[#697386] space-y-4' }, [
+        VEVA.dom.el('div', { class: 'w-16 h-16 bg-white rounded-2xl border border-[#e6ebf1] flex items-center justify-center shadow-sm' }, [VEVA.icon('shield', 32, 'text-[#697386]')]),
+        VEVA.dom.el('p', { class: 'italic font-medium text-[13px]' }, ['No tienes acceso a este módulo.'])
+      ]));
+      return;
+    }
+    var view = VEVA.views[viewId];
     if (!view) {
       mount.appendChild(VEVA.dom.el('div', { class: 'flex flex-col items-center justify-center py-20 text-[#697386] space-y-4' }, [
         VEVA.dom.el('div', { class: 'w-16 h-16 bg-white rounded-2xl border border-[#e6ebf1] flex items-center justify-center shadow-sm' }, [VEVA.icon('construction', 32, 'text-[#635bff]')]),
@@ -319,12 +334,21 @@ VEVA.MENU = [
   ]}
 ];
 
+/** Filtra por VEVA.vistasPermitidas (2026-08-10, control de acceso por
+ * vista) -- una seccion completa del menu se omite si NINGUNO de sus
+ * items quedo permitido, en vez de mostrar un encabezado de seccion
+ * vacio. Se llama DESPUES de que vistasPermitidas ya se resolvio (ver
+ * DOMContentLoaded), nunca antes -- construir el sidebar sin esperar la
+ * respuesta mostraria brevemente opciones que luego habria que ocultar. */
 function vevaBuildSidebar() {
   var nav = document.getElementById('veva-sidebar-nav');
   VEVA.dom.clear(nav);
+  var permitidas = VEVA.vistasPermitidas || [];
   VEVA.MENU.forEach(function (section) {
+    var items = section.items.filter(function (item) { return permitidas.indexOf(item.id) >= 0; });
+    if (!items.length) return;
     nav.appendChild(VEVA.dom.el('div', { class: 'px-4 mt-4 mb-2 text-[10px] font-bold text-[#697386] uppercase tracking-widest' }, [section.label]));
-    section.items.forEach(function (item) {
+    items.forEach(function (item) {
       nav.appendChild(VEVA.dom.el('button', {
         class: 'w-full flex items-center gap-3 px-4 py-2 rounded-xl text-[13px] font-medium transition-all text-[#424770] hover:bg-[#f6f9fc]',
         'data-nav': item.id,
@@ -354,7 +378,10 @@ function vevaSetupHeader() {
     });
   }
 
-  vevaCargarUsuarioHeader();
+  // vevaCargarUsuarioHeader() ya NO se llama aqui (2026-08-10) -- ahora
+  // el bootstrap (DOMContentLoaded) la llama directo y ESPERA su
+  // resultado antes de construir el sidebar/navegar, porque tambien
+  // resuelve VEVA.vistasPermitidas (control de acceso por vista).
 }
 
 /** Header real de sesion (2026-07-27, hallazgo del usuario): antes
@@ -377,34 +404,80 @@ function vevaSetupHeader() {
  * `console.error` -- header no critico, nunca bloquea el resto de la
  * app, pero tampoco se queda en silencio ni colgado en "Cargando..."
  * para siempre (hallazgo real del revisor, 2 rondas). */
+/** Devuelve la promesa (2026-08-10, antes no se retornaba nada) -- el
+ * bootstrap ahora la espera antes de construir el sidebar/navegar,
+ * porque esta misma llamada a getUsuarioActual ya trae
+ * `vistasPermitidas` (control de acceso por vista), y el sidebar/router
+ * necesitan ese dato ANTES de la primera pintura, no despues. */
 function vevaCargarUsuarioHeader() {
   var nombreEl = document.getElementById('veva-user-name');
   var rolEl = document.getElementById('veva-user-role');
-  if (!nombreEl || !rolEl) return;
-  VEVA.gas('getUsuarioActual')
+  return VEVA.gas('getUsuarioActual')
     .then(function (res) {
       if (!res || res.status !== 'success' || !res.data || !res.data.email) {
         console.error('getUsuarioActual no devolvio un email valido:', res);
-        nombreEl.textContent = 'Sesión no identificada';
+        if (nombreEl) nombreEl.textContent = 'Sesión no identificada';
+        VEVA.vistasPermitidas = [];
+        // Hallazgo de revisor (2026-08-10): antes esto se trataba igual
+        // que "0 vistas por rol", mostrando "contacta a finanzas" aunque
+        // la causa real fuera otra (falla del backend, no una respuesta
+        // de exito con datos vacios). Se guarda el mensaje real aparte
+        // para que el bootstrap pueda distinguir los 2 casos.
+        VEVA.vistasPermitidasError = (res && res.message) || 'No se pudo verificar tu acceso.';
         return;
       }
-      nombreEl.textContent = res.data.email;
-      rolEl.textContent = (res.data.roles && res.data.roles.length) ? res.data.roles.join(' · ') : 'Sin rol asignado';
+      if (nombreEl) nombreEl.textContent = res.data.email;
+      if (rolEl) rolEl.textContent = (res.data.roles && res.data.roles.length) ? res.data.roles.join(' · ') : 'Sin rol asignado';
+      VEVA.vistasPermitidas = res.data.vistasPermitidas || [];
+      VEVA.vistasPermitidasError = null;
     })
     // Hallazgo real del revisor: el header es decorativo/no critico (nunca
     // debe bloquear el resto de la app si falla), pero eso no es lo mismo
     // que silenciar el error por completo -- console.error() deja rastro
-    // depurable de una falla real (permisos, hoja movida, etc.) sin
-    // interrumpir al usuario con un banner por algo no critico.
+    // depurable de una falla real (permisos, hoja movida, etc.), Y ADEMAS
+    // (2026-08-10, 2da ronda de revisor) se le muestra al usuario un
+    // mensaje real de error en vez de uno generico incorrecto. Si esta
+    // llamada falla, VEVA.vistasPermitidas queda [] (fail-closed, mismo
+    // criterio que _tieneAccesoAVista en el backend) -- nunca undefined,
+    // para que el chequeo de VEVA.router.go no se salte por accidente.
     .catch(function (e) {
       console.error('vevaCargarUsuarioHeader fallo:', e);
-      nombreEl.textContent = 'Sesión no identificada';
+      if (nombreEl) nombreEl.textContent = 'Sesión no identificada';
+      VEVA.vistasPermitidas = [];
+      VEVA.vistasPermitidasError = String((e && e.message) || e || 'Error de conexión.');
     });
 }
 
 document.addEventListener('DOMContentLoaded', function () {
   vevaSetupHeader();
-  vevaBuildSidebar();
-  VEVA.router.go('posicion');
+  // Indicador de carga (2026-08-10, hallazgo de revisor): antes de este
+  // cambio el sidebar/main se pintaban de inmediato sin esperar ninguna
+  // respuesta del servidor; ahora sí esperan a getUsuarioActual, asi que
+  // deben mostrar algo mientras tanto en vez de quedar en blanco.
+  var mountInicial = document.getElementById('veva-main');
+  if (mountInicial) mountInicial.appendChild(VEVA.dom.el('div', { class: 'flex items-center justify-center py-20 text-[#697386]' }, [VEVA.icon('loader', 20, 'animate-spin')]));
+  vevaCargarUsuarioHeader().finally(function () {
+    vevaBuildSidebar();
+    var mount = document.getElementById('veva-main');
+    if (VEVA.vistasPermitidasError) {
+      // Caso real de falla (red/servidor) -- distinto del caso "0 vistas
+      // por rol" de abajo. Nunca el mensaje generico de "contacta a
+      // finanzas" cuando la causa real es otra.
+      VEVA.dom.clear(mount);
+      if (mount) mount.appendChild(VEVA.dom.el('div', { class: 'flex flex-col items-center justify-center py-20 text-[#697386] space-y-4' }, [
+        VEVA.dom.el('div', { class: 'w-16 h-16 bg-white rounded-2xl border border-[#e6ebf1] flex items-center justify-center shadow-sm' }, [VEVA.icon('alert-circle', 32, 'text-red-500')]),
+        VEVA.dom.el('p', { class: 'italic font-medium text-[13px] text-center max-w-xs' }, ['No se pudo verificar tu acceso: ' + VEVA.vistasPermitidasError]),
+        VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all', onClick: function () { location.reload(); } }, ['Reintentar'])
+      ]));
+    } else if (VEVA.vistasPermitidas && VEVA.vistasPermitidas.length) {
+      VEVA.router.go(VEVA.vistasPermitidas.indexOf('posicion') >= 0 ? 'posicion' : VEVA.vistasPermitidas[0]);
+    } else {
+      VEVA.dom.clear(mount);
+      if (mount) mount.appendChild(VEVA.dom.el('div', { class: 'flex flex-col items-center justify-center py-20 text-[#697386] space-y-4' }, [
+        VEVA.dom.el('div', { class: 'w-16 h-16 bg-white rounded-2xl border border-[#e6ebf1] flex items-center justify-center shadow-sm' }, [VEVA.icon('shield', 32, 'text-[#697386]')]),
+        VEVA.dom.el('p', { class: 'italic font-medium text-[13px] text-center max-w-xs' }, ['No tienes ningún módulo asignado todavía. Contacta a finanzas para que te den de alta en CAT_USUARIOS.'])
+      ]));
+    }
+  });
 });
 </script>
