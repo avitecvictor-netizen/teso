@@ -840,10 +840,19 @@ function enviarReportePosicion(payload) {
       + '</div>'
       + '</div>';
 
-    MailApp.sendEmail({
-      to:       destinatarios.join(','),
-      subject:  'Ventura Entertainment | Posicion Bancaria ' + scopeLabel + ' \u2014 ' + d.fecha,
-      htmlBody: html
+    // Remitente 2026-08-10: ya no fijo -- viene de CONFIG_TESORERIA
+    // (Svc_Pagos.js, editable desde Lista de Distribucion por los
+    // administradores listados ahi). GmailApp SI permite fijar "from",
+    // pero solo si ya es un alias "Enviar correo como" verificado de
+    // quien ejecuta el envio (executeAs:USER_ACCESSING) -- responsabilidad
+    // de quien configure el valor, el codigo no puede validarlo de
+    // antemano.
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    var configTesoreria = _leerConfigTesoreria(ss);
+    GmailApp.sendEmail(destinatarios.join(','), 'Tesorer\u00eda VLMM | Posicion Bancaria ' + scopeLabel + ' \u2014 ' + d.fecha, '', {
+      htmlBody: html,
+      from: configTesoreria.emailTesoreria,
+      name: 'Tesorer\u00eda VLMM'
     });
 
     return { status: 'success', data: { enviados: destinatarios.length }, message: 'Reporte enviado a ' + destinatarios.length + ' destinatario(s)' };

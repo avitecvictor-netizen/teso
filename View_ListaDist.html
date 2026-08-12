@@ -47,7 +47,18 @@
     // sociedad por sociedad (dropdown), lo que hacia facil pensar que se
     // "desactivo" a alguien cuando en realidad solo se desactivo en la
     // sociedad que se tenia seleccionada, mientras seguia activo en otra.
-    ccModo: 'sociedad', ccPersonaQuery: ''
+    ccModo: 'sociedad', ccPersonaQuery: '',
+
+    // ---- Tab "Remitente" (2026-08-10, nueva) ----
+    // Correo real de tesoreria corporativa que usan Posicion Bancaria y
+    // la notificacion de pagos AUTORIZADA (getConfigTesoreria/
+    // guardarConfigTesoreria, Svc_Pagos.js) -- las demas 6 transiciones
+    // de pagos NO usan esto, salen de la cuenta real de quien ejecuta la
+    // accion (ver comentario de _remitenteParaTransicion en el backend).
+    // Gateado por una lista de administradores APARTE de CAT_USUARIOS
+    // (esAdmin viene del backend, nunca se calcula en el cliente).
+    remCargado: false, remLoading: true, remSaving: false, remError: null,
+    remEmail: '', remAdmins: [], remEsAdmin: false, remNuevoAdminEmail: ''
   };
 
   function cargarLista() {
@@ -542,12 +553,151 @@
     return VEVA.dom.el('div', { class: 'space-y-6' }, children);
   }
 
+  // =====================================================================
+  // Tab "Remitente" (2026-08-10, nueva) -- correo real de tesoreria
+  // corporativa usado por Posicion Bancaria y por la notificacion de
+  // pagos AUTORIZADA. Prefijo `rem` en cada nombre por el mismo motivo
+  // que `cc`: no chocar con el estado/funciones de las otras 2 tabs que
+  // comparten este archivo.
+  // =====================================================================
+
+  function remCargar() {
+    state.remCargado = true; state.remLoading = true; state.remError = null; redraw();
+    VEVA.gas('getConfigTesoreria')
+      .then(function (res) {
+        if (!res || res.status !== 'success') throw new Error((res && res.message) || 'Error al cargar la configuración');
+        state.remEmail = res.data.emailTesoreria || '';
+        state.remAdmins = res.data.admins || [];
+        state.remEsAdmin = !!res.data.esAdmin;
+      })
+      .catch(function (e) { state.remError = String(e.message || e); })
+      .finally(function () { state.remLoading = false; redraw(); });
+  }
+
+  function remGuardar() {
+    state.remSaving = true; state.remError = null; redraw();
+    VEVA.gas('guardarConfigTesoreria', { emailTesoreria: state.remEmail, admins: state.remAdmins })
+      .then(function (res) {
+        if (res.status !== 'success') { state.remError = res.message; return; }
+        state.remEmail = res.data.emailTesoreria;
+        state.remAdmins = res.data.admins;
+      })
+      .catch(function (e) { state.remError = String(e.message || e); })
+      .finally(function () { state.remSaving = false; redraw(); });
+  }
+
+  function remQuitarAdmin(email) {
+    if (state.remAdmins.length <= 1) {
+      state.remError = 'Debe quedar al menos un administrador.';
+      redraw();
+      return;
+    }
+    state.remAdmins = state.remAdmins.filter(function (e) { return e !== email; });
+    remGuardar();
+  }
+
+  function remAgregarAdmin() {
+    var email = state.remNuevoAdminEmail.trim();
+    if (email.indexOf('@') < 0) return;
+    if (state.remAdmins.indexOf(email.toLowerCase()) >= 0) { state.remNuevoAdminEmail = ''; redraw(); return; }
+    state.remAdmins = state.remAdmins.concat([email.toLowerCase()]);
+    state.remNuevoAdminEmail = '';
+    remGuardar();
+  }
+
+  function remRenderNota() {
+    return VEVA.dom.el('div', { class: 'px-4 py-3 bg-[#f6f9fc] border border-[#e6ebf1] rounded-xl text-[12px] text-[#697386] flex items-start gap-2.5' }, [
+      VEVA.icon('mail', 14, 'text-[#697386] flex-shrink-0 mt-0.5'),
+      VEVA.dom.el('span', {}, [
+        'Este correo es el remitente real de ',
+        VEVA.dom.el('b', {}, ['Posición Bancaria']),
+        ' y de la notificación de pagos cuando una partida queda ',
+        VEVA.dom.el('b', {}, ['Autorizada']),
+        '. Las demás transiciones (cargada, revisión, liberación a banco, subida al banco, pago aplicado, rechazo) siempre salen de la cuenta real de quien ejecuta esa acción — este correo no las afecta.'
+      ])
+    ]);
+  }
+
+  function remRenderAviso() {
+    return VEVA.dom.el('div', { class: 'px-4 py-3 bg-amber-50 border border-amber-100 rounded-xl text-[12px] text-amber-800 flex items-start gap-2.5' }, [
+      VEVA.icon('alert-circle', 14, 'text-amber-600 flex-shrink-0 mt-0.5'),
+      VEVA.dom.el('span', {}, [
+        'Para que funcione, este correo debe estar configurado como alias "Enviar correo como" en la cuenta de Gmail de quien dispare Posición Bancaria o una autorización de pago — el sistema no puede verificar esto por adelantado. Si no está configurado, el envío fallará con un error visible, no en silencio.'
+      ])
+    ]);
+  }
+
+  function remRenderEmail() {
+    var inputEmail;
+    if (state.remEsAdmin) {
+      inputEmail = VEVA.dom.el('input', { type: 'email', 'data-focus-key': 'rem-email', class: 'w-full text-[13px] border border-[#e6ebf1] rounded-lg px-3 py-2.5 bg-white outline-none focus:border-[#635bff]' }, []);
+      inputEmail.value = state.remEmail;
+      inputEmail.addEventListener('input', function (e) { state.remEmail = e.target.value; });
+      inputEmail.addEventListener('change', remGuardar);
+    } else {
+      inputEmail = VEVA.dom.el('p', { class: 'text-[14px] font-mono font-semibold text-[#0a2540]' }, [state.remEmail || '—']);
+    }
+    return VEVA.dom.el('div', { class: 'space-y-1' }, [
+      VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Correo de tesorería corporativa']),
+      inputEmail
+    ]);
+  }
+
+  function remRenderAdmins() {
+    var chips = state.remAdmins.map(function (email) {
+      return VEVA.dom.el('span', { class: 'inline-flex items-center gap-1.5 bg-[#f6f9fc] border border-[#e6ebf1] rounded-full pl-3 pr-1.5 py-1 text-[12px] font-mono' }, [
+        email,
+        state.remEsAdmin ? VEVA.dom.el('button', { class: 'p-0.5 hover:bg-red-50 rounded-full text-[#697386] hover:text-red-500', onClick: function () { remQuitarAdmin(email); } }, [VEVA.icon('x', 11)]) : null
+      ].filter(Boolean));
+    });
+    var children = [
+      VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Administradores (pueden editar este correo)']),
+      VEVA.dom.el('div', { class: 'flex flex-wrap gap-2' }, chips)
+    ];
+    if (state.remEsAdmin) {
+      var inNuevo = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'rem-nuevo-admin', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff] w-64' }, []);
+      inNuevo.value = state.remNuevoAdminEmail;
+      inNuevo.addEventListener('input', function (e) { state.remNuevoAdminEmail = e.target.value; });
+      inNuevo.addEventListener('keydown', function (e) { if (e.key === 'Enter') remAgregarAdmin(); });
+      children.push(VEVA.dom.el('div', { class: 'flex items-center gap-2 pt-1' }, [
+        inNuevo,
+        VEVA.dom.el('button', { class: 'px-3 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[12px] font-semibold text-[#635bff] hover:border-[#635bff] transition-all', onClick: remAgregarAdmin }, ['Agregar admin'])
+      ]));
+    }
+    return VEVA.dom.el('div', { class: 'space-y-2' }, children);
+  }
+
+  function remRenderTab() {
+    var children = [remRenderNota()];
+    if (state.remError) {
+      children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3' }, [VEVA.icon('alert-circle', 16, 'text-red-500 flex-shrink-0'), VEVA.dom.el('p', { class: 'text-[13px] text-red-700' }, [state.remError])]));
+    }
+    if (state.remLoading) {
+      children.push(VEVA.dom.el('div', { class: 'p-6 space-y-2 bg-white rounded-xl border border-[#e6ebf1]' }, [1, 2].map(function () { return VEVA.dom.el('div', { class: 'h-12 bg-[#f6f9fc] rounded-lg animate-pulse' }, []); })));
+      return VEVA.dom.el('div', { class: 'space-y-6' }, children);
+    }
+    if (!state.remEsAdmin) {
+      children.push(VEVA.dom.el('div', { class: 'px-4 py-2.5 bg-[#f6f9fc] border border-[#e6ebf1] rounded-xl text-[12px] text-[#697386]' }, ['Solo un administrador de este correo puede editarlo. Puedes ver los valores actuales abajo.']));
+    }
+    var header = VEVA.dom.el('div', { class: 'px-6 py-3 border-b border-[#e6ebf1] bg-[#f6f9fc] flex items-center justify-between' }, [
+      VEVA.dom.el('p', { class: 'text-[11px] font-bold text-[#697386] uppercase tracking-wider' }, ['Remitente de tesorería'])
+    ]);
+    if (state.remSaving) header.appendChild(VEVA.dom.el('span', { class: 'text-[11px] text-[#697386] flex items-center gap-1.5' }, [VEVA.icon('loader', 11, 'animate-spin'), 'Guardando...']));
+    children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [
+      header,
+      VEVA.dom.el('div', { class: 'p-5 space-y-5' }, [remRenderEmail(), remRenderAdmins()])
+    ]));
+    children.push(remRenderAviso());
+    return VEVA.dom.el('div', { class: 'space-y-6' }, children);
+  }
+
   // ---- Contenedor: pestanas internas + redraw compartido ----
 
   function renderTabs() {
     var tabs = [
       { id: 'reporte', label: 'Reporte de Posición' },
-      { id: 'cc-pagos', label: 'CC de Pagos' }
+      { id: 'cc-pagos', label: 'CC de Pagos' },
+      { id: 'remitente', label: 'Remitente' }
     ];
     return VEVA.dom.el('div', { class: 'flex gap-1 border-b border-[#e6ebf1]' }, tabs.map(function (t) {
       var active = state.activeSubTab === t.id;
@@ -556,6 +706,7 @@
         onClick: function () {
           state.activeSubTab = t.id;
           if (t.id === 'cc-pagos' && !state.ccCargado) ccCargar();
+          if (t.id === 'remitente' && !state.remCargado) remCargar();
           redraw();
         }
       }, [t.label]);
@@ -574,6 +725,10 @@
     root.appendChild(renderTabs());
     if (state.activeSubTab === 'cc-pagos') {
       root.appendChild(ccRenderTab());
+      return;
+    }
+    if (state.activeSubTab === 'remitente') {
+      root.appendChild(remRenderTab());
       return;
     }
     if (state.error) {

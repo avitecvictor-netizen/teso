@@ -68,6 +68,7 @@ var SHEET_COMPROBANTES_PAGO = 'COMPROBANTES_PAGO';
 var SHEET_COMPROBANTES_PAGO_PARTIDAS = 'COMPROBANTES_PAGO_PARTIDAS';
 var SHEET_CONFIG_CONCILIACION = 'CONFIG_CONCILIACION';
 var SHEET_APLICACIONES_PAGO = 'APLICACIONES_PAGO';
+var SHEET_CONFIG_TESORERIA = 'CONFIG_TESORERIA';
 // Carpeta de Drive designada por el usuario (2026-07-26) para comprobantes
 // bancarios (PDF/imagen del portal, NO CFDI fiscal) -- no se crea una
 // carpeta nueva por codigo, ya existe.
@@ -192,6 +193,28 @@ var CONFIG_CONCILIACION_HEADERS = ['CLAVE', 'VALOR', 'DESCRIPCION'];
 var CONFIG_CONCILIACION_DEFAULTS = [
   ['TOLERANCIA_MONTO_PCT', 2, 'Porcentaje de tolerancia para BUSCAR movimientos candidatos (no aplica a confirmar el match, que exige <$1 de diferencia exacta).'],
   ['TOLERANCIA_DIAS', 2, 'Dias +/- alrededor de APLICADO_FECHA de la partida para buscar movimientos candidatos.']
+];
+
+// CONFIG_TESORERIA (2026-08-10, pedido explicito del usuario): mismo
+// patron llave/valor que CONFIG_CONCILIACION. Controla 2 cosas:
+// (1) EMAIL_TESORERIA -- remitente real de Posicion Bancaria y de la
+//     notificacion de pagos cuando la transicion es AUTORIZADA (las
+//     otras 6 transiciones usan la cuenta real de quien ejecuta la
+//     accion, ver _remitenteParaTransicion). Requiere ser un alias
+//     "Enviar correo como" YA verificado en Gmail de quien dispare esas
+//     2 acciones -- el sistema no puede validar esto de antemano, solo
+//     avisar (ver nota en el frontend).
+// (2) ADMINS_TESORERIA -- lista de emails (separados por coma), APARTE
+//     del sistema de roles de CAT_USUARIOS, autorizados a editar este
+//     correo y esta misma lista de administradores. Deliberadamente
+//     independiente del rol "Tesoreria"/"Contador": alguien puede tener
+//     ese rol operativo sin ser administrador de este control, y
+//     viceversa -- es un control mas sensible (define de donde salen
+//     las comunicaciones financieras reales), no la operacion diaria.
+var CONFIG_TESORERIA_HEADERS = ['CLAVE', 'VALOR', 'DESCRIPCION'];
+var CONFIG_TESORERIA_DEFAULTS = [
+  ['EMAIL_TESORERIA', 'tesoreria@dolphinaris.com', 'Remitente real de Posicion Bancaria y de la notificacion AUTORIZADA de pagos -- debe ser un alias "Enviar correo como" ya verificado en Gmail.'],
+  ['ADMINS_TESORERIA', 'vaviles@venturae.com.mx', 'Emails separados por coma autorizados a editar este correo y esta lista -- independiente de CAT_USUARIOS.']
 ];
 
 // CONFIG_NOTIFICACIONES_PAGOS: lista de distribucion de correo POR
@@ -509,6 +532,133 @@ function _leerConfigConciliacion(ss) {
     toleranciaMontoPct: (!isNaN(pct) && pct >= 0) ? pct : defaults.TOLERANCIA_MONTO_PCT,
     toleranciaDias: (!isNaN(dias) && dias >= 0) ? dias : defaults.TOLERANCIA_DIAS
   };
+}
+
+function _ensureConfigTesoreriaSheet(ss) {
+  var sh = ss.getSheetByName(SHEET_CONFIG_TESORERIA);
+  if (sh) return sh;
+  sh = ss.insertSheet(SHEET_CONFIG_TESORERIA);
+  sh.getRange(1, 1, 1, CONFIG_TESORERIA_HEADERS.length).setValues([CONFIG_TESORERIA_HEADERS]);
+  sh.getRange(2, 1, CONFIG_TESORERIA_DEFAULTS.length, CONFIG_TESORERIA_HEADERS.length).setValues(CONFIG_TESORERIA_DEFAULTS);
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+/** Lee CONFIG_TESORERIA con defaults de respaldo si la hoja esta vacia o
+ * alguien borro una fila por error -- nunca truena por config faltante,
+ * mismo criterio que _leerConfigConciliacion. `admins` siempre en
+ * minusculas y sin espacios, para comparar contra
+ * Session.getActiveUser().getEmail() sin depender de mayusculas. */
+function _leerConfigTesoreria(ss) {
+  var sh = _ensureConfigTesoreriaSheet(ss);
+  var defaults = { EMAIL_TESORERIA: 'tesoreria@dolphinaris.com', ADMINS_TESORERIA: 'vaviles@venturae.com.mx' };
+  var map = {};
+  if (sh.getLastRow() >= 2) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach(function (r) { if (r[0]) map[String(r[0]).trim()] = r[1]; });
+  }
+  var email = String(map.EMAIL_TESORERIA || '').trim();
+  var adminsRaw = String(map.ADMINS_TESORERIA || '').trim();
+  return {
+    emailTesoreria: email || defaults.EMAIL_TESORERIA,
+    admins: (adminsRaw || defaults.ADMINS_TESORERIA).split(',')
+      .map(function (e) { return e.trim().toLowerCase(); })
+      .filter(function (e) { return e; })
+  };
+}
+
+function _esAdminTesoreria(ss) {
+  var config = _leerConfigTesoreria(ss);
+  var email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
+  return !!email && config.admins.indexOf(email) >= 0;
+}
+
+/** Decide el remitente real de un correo de PAGOS segun el tipo de
+ * transicion (2026-08-10, pedido explicito del usuario). AUTORIZADA usa
+ * el correo de tesoreria corporativa (config editable via
+ * getConfigTesoreria/guardarConfigTesoreria); las otras 6 transiciones
+ * (CARGADA/CONFIRMADA/LIBERADA A BANCO/SUBIDA EN BANCA/APLICADA EN
+ * BANCA/RECHAZADA) devuelven null -- OMITIR from/name (no fijarlo a
+ * emailActor) para que GmailApp use la cuenta real de quien ejecuta,
+ * sin depender de que emailActor sea un alias verificado (nunca lo
+ * necesita, es literalmente la cuenta que esta corriendo el codigo).
+ * Verificado (revisor + planificador, 2026-08-10, ver comentario en
+ * _tipoTransicionNotificable): 'autorizado' nunca se agrupa con otra
+ * transicion en el mismo correo seccionado -- nunca hace falta decidir
+ * un remitente mixto dentro de un mismo envio. `enviarReportePosicion`
+ * (Codigo.js) usa esta misma config directamente, siempre, sin pasar
+ * por esta funcion (no depende del tipo de transicion). */
+function _remitenteParaTransicion(ss, transicion) {
+  if (!transicion || transicion.tipo !== 'autorizado') return null;
+  var config = _leerConfigTesoreria(ss);
+  return { from: config.emailTesoreria, name: 'Tesorería VLMM' };
+}
+
+/** payload = {} (sin campos). Expone tambien `esAdmin` para que el
+ * frontend sepa si debe mostrar los controles de edicion sin tener que
+ * duplicar la logica de _esAdminTesoreria en el cliente. */
+function getConfigTesoreria() {
+  try {
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoValido(ss)) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    var config = _leerConfigTesoreria(ss);
+    return { status: 'success', data: { emailTesoreria: config.emailTesoreria, admins: config.admins, esAdmin: _esAdminTesoreria(ss) }, message: '' };
+  } catch (e) {
+    return { status: 'error', data: {}, message: e.toString() };
+  }
+}
+
+/** payload = { emailTesoreria, admins:[email,...] }. Gateado por
+ * _esAdminTesoreria (lista aparte de CAT_USUARIOS, ver comentario de
+ * CONFIG_TESORERIA_DEFAULTS) -- rechazado server-side, no solo oculto
+ * en la UI. Nunca permite guardar una lista de administradores vacia:
+ * eso dejaria el control sin nadie que pueda volver a editarlo. */
+function guardarConfigTesoreria(payload) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoValido(ss)) return { status: 'error', data: {}, message: 'No tienes acceso a este módulo. Contacta a finanzas para que te den de alta en CAT_USUARIOS.' };
+    if (!_esAdminTesoreria(ss)) return { status: 'error', data: {}, message: 'Solo un administrador de Tesorería puede editar esto.' };
+
+    var emailNuevo = String(payload.emailTesoreria || '').trim();
+    if (!emailNuevo || emailNuevo.indexOf('@') < 0) return { status: 'error', data: {}, message: 'Correo de tesorería inválido.' };
+
+    var adminsNuevo = (payload.admins || [])
+      .map(function (e) { return String(e || '').trim(); })
+      .filter(function (e) { return e; });
+    if (!adminsNuevo.length) return { status: 'error', data: {}, message: 'Debe quedar al menos un administrador -- de lo contrario nadie podría volver a editar esto.' };
+    var adminInvalido = adminsNuevo.filter(function (e) { return e.indexOf('@') < 0; })[0];
+    if (adminInvalido) return { status: 'error', data: {}, message: 'Correo de administrador inválido: "' + adminInvalido + '".' };
+
+    var sh = _ensureConfigTesoreriaSheet(ss);
+    var vals = sh.getLastRow() >= 2 ? sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues() : [];
+    var rowMap = {};
+    vals.forEach(function (r, i) { if (r[0]) rowMap[String(r[0]).trim()] = i + 2; });
+    // Si alguien borro a mano la fila CLAVE (mismo escenario real que ya
+    // contempla _leerConfigConciliacion), NO se salta en silencio -- se
+    // reinserta la fila, para que "guardar" nunca devuelva exito sin
+    // haber persistido nada (hallazgo de revisor, 2026-08-10).
+    if (rowMap.EMAIL_TESORERIA) {
+      sh.getRange(rowMap.EMAIL_TESORERIA, 2).setValue(emailNuevo);
+    } else {
+      sh.appendRow(['EMAIL_TESORERIA', emailNuevo, CONFIG_TESORERIA_DEFAULTS[0][2]]);
+    }
+    if (rowMap.ADMINS_TESORERIA) {
+      sh.getRange(rowMap.ADMINS_TESORERIA, 2).setValue(adminsNuevo.join(','));
+    } else {
+      sh.appendRow(['ADMINS_TESORERIA', adminsNuevo.join(','), CONFIG_TESORERIA_DEFAULTS[1][2]]);
+    }
+
+    return {
+      status: 'success',
+      data: { emailTesoreria: emailNuevo, admins: adminsNuevo.map(function (e) { return e.toLowerCase(); }) },
+      message: 'Configuración guardada.'
+    };
+  } catch (e) {
+    return { status: 'error', data: {}, message: e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function _ensureConfigNotificacionesPagoSheet(ss) {
@@ -2876,9 +3026,14 @@ function _enviarCorreoNotificacionPagoSeccionado(ss, sociedad, secciones, emailA
     + '<p style="font-size:11px;color:#94a3b8;margin:0;">Realizado por ' + (emailActor || '') + ' — ' + fechaHora + '</p>'
     + '</div></div>';
 
-  var payloadCorreo = { to: destinatarios.join(','), subject: asunto, htmlBody: html };
-  if (copias.length) payloadCorreo.cc = copias.join(',');
-  MailApp.sendEmail(payloadCorreo);
+  // Remitente condicional (2026-08-10, ver _remitenteParaTransicion):
+  // AUTORIZADA usa el correo de tesoreria configurable; el resto omite
+  // from/name para que salga de la cuenta real de quien ejecuta.
+  var remitente = _remitenteParaTransicion(ss, secciones[0].transicion);
+  var opciones = { htmlBody: html };
+  if (copias.length) opciones.cc = copias.join(',');
+  if (remitente) { opciones.from = remitente.from; opciones.name = remitente.name; }
+  GmailApp.sendEmail(destinatarios.join(','), asunto, '', opciones);
 }
 
 function _enviarCorreoNotificacionPagoUnica(ss, sociedad, transicion, items, emailActor, ccExtraEmails) {
@@ -2945,9 +3100,14 @@ function _enviarCorreoNotificacionPagoUnica(ss, sociedad, transicion, items, ema
     + '<p style="font-size:11px;color:#94a3b8;margin:0;">Realizado por ' + (emailActor || '') + ' — ' + fechaHora + '</p>'
     + '</div></div>';
 
-  var payloadCorreo = { to: destinatarios.join(','), subject: asunto, htmlBody: html };
-  if (copias.length) payloadCorreo.cc = copias.join(',');
-  MailApp.sendEmail(payloadCorreo);
+  // Remitente condicional (2026-08-10, ver _remitenteParaTransicion):
+  // AUTORIZADA usa el correo de tesoreria configurable; el resto omite
+  // from/name para que salga de la cuenta real de quien ejecuta.
+  var remitente = _remitenteParaTransicion(ss, transicion);
+  var opciones = { htmlBody: html };
+  if (copias.length) opciones.cc = copias.join(',');
+  if (remitente) { opciones.from = remitente.from; opciones.name = remitente.name; }
+  GmailApp.sendEmail(destinatarios.join(','), asunto, '', opciones);
 }
 
 /** Todas las filas de todas las sociedades -- el frontend agrupa/filtra
