@@ -95,6 +95,13 @@
   function guardarParaSociedad(sociedad, nuevaListaSociedad) {
     return VEVA.gas('guardarListaNotificacionesPago', { sociedad: sociedad, lista: nuevaListaSociedad })
       .then(function (res) {
+        // Bug real (2026-08-14, mismo caso que CC de Pagos): al agregar un
+        // contacto en varias sociedades de un jalon, alguna respuesta del
+        // servidor puede llegar vacia -- accedir res.status sin verificar
+        // primero que `res` exista tronaba con "Cannot read properties of
+        // null" en vez de un error claro. El guardado puede haber si
+        // ocurrido en el servidor aunque la confirmacion no llego.
+        if (!res) return { ok: false, message: 'Sin respuesta del servidor -- refresca la pantalla para confirmar si se guardó antes de repetir.' };
         if (res.status !== 'success') return { ok: false, message: res.message };
         // Bug reportado (2026-08-12, mismo caso que CC de Pagos): se usa
         // la lista que el backend confirma haber guardado, no el payload

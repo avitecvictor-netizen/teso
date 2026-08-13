@@ -256,6 +256,15 @@
   function ccGuardarParaSociedad(sociedad, nuevaListaSociedad) {
     return VEVA.gas('guardarListaCcPagos', { sociedad: sociedad, lista: nuevaListaSociedad })
       .then(function (res) {
+        // Bug real (2026-08-14): al dar de alta un contacto en muchas
+        // sociedades de un jalon (ccAgregar encadena 1 guardado por
+        // sociedad marcada), alguna respuesta del servidor puede llegar
+        // vacia -- accedir res.status sin verificar primero que `res`
+        // exista tronaba con "Cannot read properties of null" en vez de
+        // mostrar un error claro. El guardado en si puede haber si
+        // ocurrido en el servidor aunque la confirmacion no haya
+        // llegado -- por eso el mensaje pide refrescar antes de repetir.
+        if (!res) return { ok: false, message: 'Sin respuesta del servidor -- refresca la pantalla para confirmar si se guardó antes de repetir.' };
         if (res.status !== 'success') return { ok: false, message: res.message };
         // Bug reportado (2026-08-12): antes se actualizaba el estado local
         // con lo que ESTE cliente habia mandado a guardar, nunca con lo

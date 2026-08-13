@@ -2835,30 +2835,49 @@ function _notificarTransicionPagos(ss, idsExitosos, transicion, emailActor) {
  * (arriba), que ahora delega aqui -- comportamiento identico a antes de
  * este bloque para todos ellos.
  *
- * Bug D (2026-08-12): esta funcion YA NO envia el correo de forma
- * sincrona -- antes GmailApp.sendEmail corria dentro del mismo request
- * que la UI estaba esperando (updatePartidaPago/bulkUpdatePartidasPago),
- * sintiendose lenta/colgada, y el correo podia llegar al destinatario
- * ANTES de que quien ejecuto la accion viera el resultado en pantalla.
- * Apps Script no tiene un verdadero "fire-and-forget" dentro de la misma
- * ejecucion -- la unica forma real de desacoplar es encolar el trabajo
- * (hoja COLA_NOTIFICACIONES_PAGO) y procesarlo en una ejecucion aparte
- * via un trigger de tiempo recurrente (procesarColaNotificacionesPago,
- * cada 1 minuto, instalado una sola vez para todo el proyecto -- nunca
- * un trigger nuevo por accion, para no agotar la cuota de triggers). El
- * envio real (antes el cuerpo de esta misma funcion) vive ahora en
- * _procesarGrupoNotificacionPagos. Trade-off aceptado: el correo puede
- * tardar hasta ~1 minuto en salir, a cambio de que la pantalla responda
- * de inmediato. */
+ * Bug D (2026-08-12) -- REVERTIDO 2026-08-13 a peticion explicita del
+ * usuario. El intento de desacoplar el envio (encolar en
+ * COLA_NOTIFICACIONES_PAGO + trigger de tiempo cada 1 minuto,
+ * `procesarColaNotificacionesPago`) resulto NO ser confiable en
+ * produccion: un trigger creado en tiempo de ejecucion queda ligado a la
+ * identidad de quien haya disparado la PRIMERA notificacion despues del
+ * deploy (no a una cuenta fija del sistema), y puede fallar en silencio
+ * si la autorizacion de esa cuenta especifica tiene algun problema --
+ * eso fue justamente lo que paso (un correo de prueba nunca llego pese a
+ * esperar varios minutos). Se vuelve a enviar de forma SINCRONA, dentro
+ * del mismo request que la UI espera -- el trade-off de lentitud
+ * percibida se acepta de nuevo a cambio de que el correo SIEMPRE salga
+ * de verdad. `_ensureColaNotificacionesPagoSheet`/`_ensureColaTriggerInstalado`/
+ * `procesarColaNotificacionesPago` se dejan sin usar (no se borran): si
+ * ya existe un trigger instalado en produccion apuntando a
+ * `procesarColaNotificacionesPago`, borrar esa funcion lo haria fallar
+ * en cada disparo -- se deja como no-op inofensivo (la cola ya no recibe
+ * filas nuevas, `lastRow < 2` hace que retorne de inmediato). */
 function _notificarTransicionPagosMultiple(ss, grupos, emailActor) {
+  grupos = (grupos || []).filter(function (g) { return g.transicion && g.idsExitosos && g.idsExitosos.length; });
+  if (!grupos.length) return;
+  _limpiarTriggerColaObsoleto();
+  _procesarGrupoNotificacionPagos(ss, grupos, emailActor);
+}
+
+/** Hallazgo real del revisor (reversion del Bug D, 2026-08-13): el
+ * trigger de tiempo instalado durante el Bug D (`procesarColaNotificacionesPago`,
+ * cada 1 minuto) sigue corriendo en produccion indefinidamente como
+ * no-op silencioso si nadie lo borra. Best-effort: bajo executeAs:
+ * USER_ACCESSING, ScriptApp.getProjectTriggers() SOLO ve los triggers
+ * que la cuenta que ejecuta esto puede administrar -- si la cuenta que
+ * creo el trigger es distinta de quien dispara esta notificacion, esta
+ * llamada simplemente no encuentra nada que borrar (nunca lanza, no
+ * bloquea el envio). Limpieza garantizada requiere entrar a Apps Script
+ * > Activadores del proyecto y borrarlo a mano si esto no alcanza (ver
+ * PROJECT_STATUS.md). */
+function _limpiarTriggerColaObsoleto() {
   try {
-    grupos = (grupos || []).filter(function (g) { return g.transicion && g.idsExitosos && g.idsExitosos.length; });
-    if (!grupos.length) return;
-    var sh = _ensureColaNotificacionesPagoSheet(ss);
-    sh.appendRow([Utilities.getUuid(), JSON.stringify(grupos), emailActor || '', new Date(), false, '', '']);
-    _ensureColaTriggerInstalado();
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      if (t.getHandlerFunction() === 'procesarColaNotificacionesPago') ScriptApp.deleteTrigger(t);
+    });
   } catch (e) {
-    Logger.log('No se pudo encolar la notificacion de pagos (no afecta la mutacion ya guardada): ' + e.toString());
+    Logger.log('No se pudo limpiar el trigger obsoleto de la cola de notificaciones (no afecta el envio): ' + e.toString());
   }
 }
 
