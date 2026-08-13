@@ -331,6 +331,13 @@ VEVA.MENU = [
     { id: 'admin-flujo', label: 'Configuracion Flujo', icon: 'sliders' },
     { id: 'lista-dist', label: 'Lista de Distribucion', icon: 'mail' },
     { id: 'notificaciones-pagos', label: 'Notificaciones de Pagos', icon: 'send' }
+  ]},
+  // Seccion aparte a proposito (2026-08-13): 'lineamientos' es la unica
+  // vista sin restriccion de CAT_USUARIOS (ver VISTAS_SIN_RESTRICCION,
+  // Codigo.js) -- separarla deja claro visualmente que no es parte del
+  // resto de vistas gateadas por rol.
+  { id: 'ayuda', label: 'AYUDA', items: [
+    { id: 'lineamientos', label: 'Lineamientos', icon: 'file-text' }
   ]}
 ];
 

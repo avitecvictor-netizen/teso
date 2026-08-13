@@ -79,13 +79,24 @@ var VISTA_ROLES_PERMITIDOS = {
 // ademas esten en ADMINS_TESORERIA.
 var VISTAS_SOLO_ADMIN_TESORERIA = ['lista-dist', 'notificaciones-pagos'];
 
+// 'lineamientos' (2026-08-13, pedido explicito del usuario): vista de
+// solo lectura (manual de procesos) que debe ser visible para CUALQUIER
+// cuenta de Google que pase el filtro de dominio del deployment, SIN
+// exigir alta previa en CAT_USUARIOS -- a proposito, para no bloquear a
+// gente que solo necesita consultar el manual. Es un 3er patron de gate
+// (junto a por-rol y solo-admin), documentado aparte para que quede
+// claro por que esta vista es la excepcion al resto (todas las demas
+// vistas de TESO exigen CAT_USUARIOS).
+var VISTAS_SIN_RESTRICCION = ['lineamientos'];
+
 /** Unico punto de verdad para "¿puede este usuario ver esta vista?" --
  * usado tanto para filtrar el menu (getUsuarioActual) como para el gate
  * real server-side de cada funcion de backend que sirve esa vista. Una
- * vista NO mapeada en ninguna de las 2 listas de arriba se deniega
+ * vista NO mapeada en ninguna de las 3 listas de arriba se deniega
  * (fail-closed tambien para vistas desconocidas -- evita que una vista
  * nueva quede sin control por simple olvido de agregarla al mapa). */
 function _tieneAccesoAVista(ss, vistaId) {
+  if (VISTAS_SIN_RESTRICCION.indexOf(vistaId) >= 0) return true;
   if (VISTAS_SOLO_ADMIN_TESORERIA.indexOf(vistaId) >= 0) return _esAdminTesoreria(ss);
   var roles = VISTA_ROLES_PERMITIDOS[vistaId];
   if (!roles) return false;

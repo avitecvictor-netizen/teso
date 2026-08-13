@@ -901,7 +901,7 @@ function getUsuarioActual() {
     var usuarios = _pagoSheetToObjects(_ensureCatUsuariosSheet(ss), CAT_USUARIOS_HEADERS);
     var email = Session.getActiveUser().getEmail();
     var propios = usuarios.filter(function (u) { return u.email === email && _esActivo(u.activo); });
-    var todasLasVistas = Object.keys(VISTA_ROLES_PERMITIDOS).concat(VISTAS_SOLO_ADMIN_TESORERIA);
+    var todasLasVistas = Object.keys(VISTA_ROLES_PERMITIDOS).concat(VISTAS_SOLO_ADMIN_TESORERIA, VISTAS_SIN_RESTRICCION);
     var vistasPermitidas = todasLasVistas.filter(function (v) { return _tieneAccesoAVista(ss, v); });
     // Nombre real (2026-08-12, pedido pendiente desde la ronda 2026-07-28):
     // antes el header solo mostraba el email crudo -- ni siquiera usaba

@@ -1,0 +1,542 @@
+<script>
+/**
+ * TESO - Vista: Lineamientos (2026-08-13).
+ * Contenido curado de "Lineamientos2.json" (export de otro proyecto de
+ * Apps Script, ajeno a TESO) -- se tomo SOLO el contenido (secciones,
+ * glosario, FAQ, calendario, reglas de corte), NUNCA el motor de UI
+ * original (su propio nav/scrollspy/buscador/impresion/selector de
+ * modulos, con su propio Tailwind CDN + Google Fonts + html2pdf por
+ * CDN) -- esta vista sigue el patron real de TESO (state/redraw/
+ * VEVA.registerView, mismo Tailwind ya compilado, mismos tokens de
+ * color que el resto de la app), por CONVENCIONES_TESO_1.md.
+ *
+ * Acceso: vista SIN restriccion de CAT_USUARIOS (ver
+ * VISTAS_SIN_RESTRICCION en Codigo.js) -- cualquier cuenta de Google que
+ * pase el filtro de dominio del deployment puede verla, a proposito,
+ * para no exigir alta previa a gente que solo necesita consultar estos
+ * lineamientos.
+ *
+ * Los 2 modulos sin contenido real (Activo Fijo, Consolidacion) se
+ * muestran con un aviso explicito de "pendiente" -- no se fabrico texto
+ * de relleno (decision del usuario, 2026-08-13).
+ */
+(function () {
+  var state = { activeModulo: 'tesoreria' };
+
+  // =====================================================================
+  // DATOS (curados de Lineamientos2.json, modulo por modulo). Editar aqui
+  // el contenido -- nunca en el motor de render de abajo.
+  // =====================================================================
+  var MODULES = {};
+
+  MODULES.tesoreria = {
+    meta: {
+      tituloCorto: 'Tesorería', tituloLargo: 'Lineamientos Operativos de Tesorería',
+      subtitulo: 'Grupo Ventura · Manual de referencia', version: 'v2.1',
+      fechaActualizacion: '23 de julio de 2026', contacto: 'Ante cualquier duda, escribe al equipo de Tesorería.'
+    },
+    cortes: [
+      { dias: [1, 2, 3, 4], hora: 13 * 60 + 30, etiqueta: '13:30 hrs · pagos nacionales' },
+      { dias: [5], hora: 12 * 60, etiqueta: '12:00 hrs · corte general de viernes' }
+    ],
+    resumenEjecutivo: [
+      'Todo pago requiere estar 100% registrado en SAP, no basta con que la factura esté en el portal de proveedores.',
+      'Los cortes son de lunes a jueves 13:30 hrs (nacional) y 12:00 hrs (extranjero); los viernes el corte general es 12:00 hrs.',
+      'Las altas de cuentas bancarias se procesan solo los miércoles por la tarde; las altas de proveedores en portales, solo los lunes.',
+      'Toda solicitud fuera de estos lineamientos requiere autorización expresa de Contraloría y/o Dirección de Finanzas.'
+    ],
+    statsRapidas: [
+      { etiqueta: 'Pagos nacionales', valor: '13:30', color: 'amber' },
+      { etiqueta: 'Pagos extranjero', valor: '12:00', color: 'amber' },
+      { etiqueta: 'Cierre viernes', valor: '12:00', color: 'amber' },
+      { etiqueta: 'Altas bancarias', valor: 'Miércoles', color: 'blue' }
+    ],
+    diasPorSociedad: {
+      columnas: ['Día de pago', 'Sociedad', 'Nombre comercial', 'Grupo'],
+      filas: [
+        ['Martes', 'AA · Acuario Arrecifal', 'Dolphinaris Cz Blu', 'Grupo 1'],
+        ['Martes', 'BL · Blau Life', 'Acuario Inbursa', 'Grupo 1'],
+        ['Martes', 'VE · Ventura', 'Ventura', 'Grupo 1'],
+        ['Martes', 'GE · Gecsa', 'Grupo Gecsa', 'Grupo 1'],
+        ['Miércoles', 'BAJ · Acuario del Bajío', 'Sealand Bajío', 'Grupo 2'],
+        ['Miércoles', 'AO · Acuario del Oeste', 'Sealand Monterrey', 'Grupo 2'],
+        ['Miércoles', 'PM · Parc Mesidor', 'Sealand Guadalajara', 'Grupo 2'],
+        ['Jueves', 'TGO · Top Golf', 'Top Golf Mty', 'Grupo 3'],
+        ['Jueves', 'SL · Soccer Loco', 'Toca Social', 'Grupo 3'],
+        ['Jueves', 'SEV · Servicios Estratégicos Ventura', 'SEV', 'Grupo 3']
+      ]
+    },
+    secciones: [
+      {
+        id: 's1', numero: '01', icono: 'wallet', titulo: 'Programación operativa: envío de morralla',
+        bloques: [
+          { tipo: 'texto', texto: 'El envío de morralla (pagos menores gestionados en un solo lote semanal) de la semana está programado de manera exclusiva para el día lunes.' },
+          { tipo: 'grid', items: [
+            { titulo: 'Cuentas Inbursa', texto: 'La solicitud debe enviarse el viernes anterior para quedar aplicada el lunes antes de las 9:30 hrs.', color: 'blue' },
+            { titulo: 'Resto de bancos', texto: 'La solicitud debe enviarse a más tardar el lunes a las 12:30 hrs.', color: 'amber' }
+          ] }
+        ]
+      },
+      {
+        id: 's2', numero: '02', icono: 'file-text', titulo: 'Requisitos para que tu solicitud entre al ciclo semanal',
+        bloques: [
+          { tipo: 'texto', texto: 'Para que una solicitud de pago se considere dentro del ciclo semanal en curso, debe cumplir obligatoriamente estos tres puntos. Márcalos antes de enviar tu solicitud como autoverificación:' },
+          { tipo: 'checklist', items: [
+            'Registro correcto en SAP — que la factura esté en el portal de proveedores no significa que ya esté completa y bien registrada en SAP.',
+            'Datos completos para pago (referencias, cupones, líneas de captura) y soporte vigente: carátula bancaria o estado de cuenta con antigüedad no mayor a 2 meses.',
+            'Si es adquisición de activo fijo: referencia del elemento PEP correspondiente al pago (cuando aplique).'
+          ] },
+          { tipo: 'alerta', variante: 'info', titulo: 'Proveedores inactivos', texto: 'Si el proveedor nacional no ha tenido pagos en más de 12 meses, o el proveedor extranjero en más de 6 meses, se solicitará confirmación para reactivar la cuenta antes de procesar el pago.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Solicitudes incompletas', texto: 'Las solicitudes incompletas o con inconsistencias pasan automáticamente al siguiente ciclo de pago.' }
+        ]
+      },
+      {
+        id: 's3', numero: '03', icono: 'activity', titulo: 'Horarios de corte para programación',
+        bloques: [
+          { tipo: 'nota', titulo: 'De lunes a jueves' },
+          { tipo: 'timebox', items: [
+            { hora: '13:30 hrs', texto: 'Pagos nacionales (moneda local)' },
+            { hora: '12:00 hrs', texto: 'Pagos a cuentas en el extranjero' }
+          ] },
+          { tipo: 'nota', titulo: 'Exclusivo días viernes' },
+          { tipo: 'timebox', items: [{ hora: '12:00 hrs', texto: 'Horario límite general de los viernes' }] },
+          { tipo: 'alerta', variante: 'info', titulo: 'Requisitos adicionales de cierre semanal' },
+          { tipo: 'lista', items: [
+            'Expediente 100% integrado.',
+            'Validación previa de datos bancarios concluida.',
+            'Facturas correctamente registradas en SAP y autorizadas.'
+          ] }
+        ]
+      },
+      {
+        id: 's4', numero: '04', icono: 'credit-card', titulo: 'Gestión de cuentas y proveedores',
+        bloques: [
+          { tipo: 'nota', titulo: 'Altas de cuentas bancarias', texto: 'Se gestionan exclusivamente los días miércoles por la tarde. Para poder usarse esa misma semana, la documentación debe enviarse los días lunes antes de las 12:00 hrs para que pueda gestionarse el alta y poder ser sujeto en el pago de la semana.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Proveedores dados de alta el mismo día', texto: 'No se procesan pagos urgentes a proveedores registrados el mismo día de la solicitud.' },
+          { tipo: 'grid', items: [
+            { titulo: 'Pagos mayores a $100,000 MXN', texto: 'Se realiza una transferencia de prueba de $10 MXN para validar la CLABE/CEP antes de liberar el monto restante.', color: 'blue' },
+            { titulo: 'Cuentas en dólares', texto: 'Requieren confirmación bancaria vía correo (SWIFT, ABA y/o banco intermediario) y contrato obligatorio en expediente.', color: 'teal' }
+          ] }
+        ]
+      },
+      {
+        id: 's5', numero: '05', icono: 'alert-circle', titulo: 'Reglas especiales de programación',
+        bloques: [
+          { tipo: 'nota', titulo: '1. Pagos sin soporte documental', texto: 'Los pagos aprobados que no cuenten con soporte documental completo (carátulas, referencias, cupones) no se procesan.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Reprogramación automática', texto: 'Se reprograman para el siguiente ciclo semanal, dentro de los montos disponibles. La caja opera bajo un esquema revolvente.' },
+          { tipo: 'nota', titulo: '2. Pagos urgentes', texto: 'Deben ser aprobados por la Dirección de Finanzas. No se aplican pagos que no cuenten con esa autorización.' },
+          { tipo: 'nota', titulo: '3. Anticipos para gastos de viaje', texto: 'Toda solicitud de anticipo debe enviarse con 3 días de anticipación. Cualquier excepción debe ser autorizada por la Dirección de Finanzas.' },
+          { tipo: 'nota', titulo: '4. Trámites gubernamentales', texto: 'Deben considerarse con 6 días de anticipación. Para garantizar la correcta facturación y deducibilidad, deben pagarse a más tardar 6 días hábiles antes del cierre de mes.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Autorizaciones por excepción', texto: 'Cualquier excepción a estos lineamientos requiere autorización expresa y formal de Contraloría y/o la Dirección de Finanzas.' }
+        ]
+      },
+      {
+        id: 's6', numero: '06', icono: 'calendar', titulo: 'Calendario de pagos por sociedad',
+        bloques: [
+          { tipo: 'texto', texto: 'A partir de julio, la programación semanal de pagos se organiza por sociedad: cada grupo tiene un día fijo de la semana, de forma regular y recurrente durante todo el mes.' },
+          { tipo: 'grid', items: [
+            { titulo: 'Martes', texto: 'AA · BL · VE · GE', color: 'amber' },
+            { titulo: 'Miércoles', texto: 'BAJ · AO · PM', color: 'amber' },
+            { titulo: 'Jueves', texto: 'TGO · SL · SEV', color: 'amber' }
+          ] },
+          { tipo: 'nota', titulo: 'Viernes y lunes', texto: 'Quedan reservados exclusivamente para pagos especiales programados por convenio; no forman parte del ciclo regular semanal por sociedad.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Excepción por día de nómina', texto: 'Cuando el día de pago asignado a un grupo coincide con el día de procesamiento de nómina, ese pago se recorre o se anticipa un día. El ajuste se avisa oportunamente por este mismo medio. Ejemplo: el 30 de julio se procesa nómina, así que el pago de las sociedades programadas ese día se recorre conforme a esta regla.' }
+        ]
+      },
+      {
+        id: 's7', numero: '07', icono: 'calendar', titulo: 'Calendario de días inhábiles y nómina',
+        bloques: [
+          { tipo: 'texto', texto: 'Estos días se consideran inhábiles, de nómina, aguinaldo o guardia. Cuando alguno coincide con el día de pago regular de un grupo de sociedades, ese pago se recorre o anticipa un día, conforme a la regla de la sección anterior.' },
+          { tipo: 'tabla-calendario' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Semana con doble afectación (15–16 de septiembre)', texto: 'Incluye dos días inhábiles consecutivos que coinciden con los días de pago de dos grupos de sociedades en la misma semana (martes/miércoles). Esta semana requiere revisión particular; el esquema se avisará una semana antes. Tentativamente, el lunes se pagaría a AA y TGO, y el resto de los pagos se recorrería a jueves y viernes.' }
+        ]
+      },
+      {
+        id: 's8', numero: '08', icono: 'credit-card', titulo: 'Política de gestión de cuentas bancarias',
+        bloques: [
+          { tipo: 'lista', titulo: 'Resumen de cambios principales', items: [
+            'Centralización total: todas las altas y modificaciones se gestionan exclusivamente a través de Datos Maestros.',
+            'Día único de procesamiento: Tesorería procesa altas en portales bancarios únicamente los lunes.',
+            'Ampliaciones a otra sociedad: toda extensión requiere carátula bancaria vigente, con antigüedad no mayor a 3 meses.',
+            'Depuración de cuentas: al actualizar una cuenta, la anterior se elimina de SAP y de los portales. No coexisten cuenta activa y anterior.',
+            'Regla de unicidad: solo se permite una cuenta bancaria por tipo de moneda por proveedor.',
+            'Baja por inactividad: proveedores sin operaciones durante un año se bloquean en SAP y se eliminan de los portales.'
+          ] },
+          { tipo: 'nota', titulo: '1.1 Canal oficial de recepción', texto: 'Toda solicitud de alta, modificación o baja debe canalizarse exclusivamente a través de Datos Maestros. Tesorería no atiende solicitudes recibidas por otros medios.' },
+          { tipo: 'nota', titulo: '1.2 Regla de unicidad por moneda', texto: 'Solo puede mantenerse activa una cuenta bancaria por tipo de divisa por proveedor (por ejemplo, una en MXN y otra en USD). Cualquier cambio de moneda debe enviarse a Datos Maestros con la carátula correspondiente.' },
+          { tipo: 'nota', titulo: '1.3 Actualización y sincronización de cuentas', texto: 'Cuando un proveedor solicita cambio de cuenta: Datos Maestros registra la nueva cuenta en SAP y bloquea/elimina la anterior; Tesorería la registra en el portal bancario y elimina la cuenta sustituida. SAP y los portales bancarios deben mantenerse en espejo en todo momento.' },
+          { tipo: 'nota', titulo: '1.4 Ampliaciones a otras sociedades', texto: 'El registro en una sociedad no implica vigencia en otra: es común que un proveedor ya esté en SAP pero no en la banca electrónica de otra sociedad, porque una paga por BBVA y otra por Banorte, por ejemplo. Cada ampliación requiere carátula bancaria actualizada con antigüedad no mayor a 3 meses.' },
+          { tipo: 'nota', titulo: '1.5 Inactividad y reactivación', texto: 'Proveedores con un año sin operaciones se bloquean en SAP y se eliminan de los portales. La reactivación se trata como un alta nueva: documentación y carátula vigentes desde Datos Maestros.' },
+          { tipo: 'alerta', variante: 'info', titulo: '1.6 Tiempo de corte — procesamiento los lunes', texto: 'Límite de recepción: 13:00 hrs del lunes. Las solicitudes posteriores se atienden en el ciclo de la semana siguiente, salvo excepciones formalmente autorizadas por la gerencia correspondiente.' },
+          { tipo: 'grid', items: [
+            { titulo: '1.7a Pagos internacionales — datos obligatorios', texto: 'Nombre y dirección del banco · código SWIFT/BIC · ABA (EE. UU.) o IBAN (Europa) · banco intermediario cuando aplique.', color: 'teal' },
+            { titulo: '1.7b Cuentas individualizadas', texto: 'Para grandes facturadores con convenio, RAP, CIE, fideicomiso u otro mecanismo de depósito referenciado: el soporte no es la carátula bancaria, sino el contrato, póliza o factura oficial con las instrucciones de depósito.', color: 'amber' }
+          ] },
+          { tipo: 'grid', items: [
+            { titulo: '2.1 Cuenta centralizada de nómina', texto: 'Todos los reembolsos de gastos, viáticos y comprobaciones de caja chica se pagan exclusivamente a la cuenta de nómina registrada en Recursos Humanos.', color: 'blue' },
+            { titulo: '2.2 Prohibición de cuentas de terceros', texto: 'Queda prohibido registrar cuentas a nombre de familiares, cónyuges o cualquier tercero. La cuenta debe estar a nombre del empleado registrado en SAP.', color: 'red' }
+          ] },
+          { tipo: 'nota', titulo: '3. Devoluciones a clientes y pagos excepcionales', texto: 'Contabilidad es responsable de validar previamente la información y remitir a Tesorería, de manera acumulada, las instrucciones para este tipo de pagos.' },
+          { tipo: 'alerta', variante: 'advertencia', titulo: 'Autorizaciones por excepción', texto: 'Cualquier excepción a los tiempos, canales o requisitos de esta política requiere autorización expresa de la gerencia correspondiente y/o Contraloría.' }
+        ]
+      }
+    ],
+    calendarioExcepciones: [
+      { fecha: '29/06/2026', motivo: 'Nómina', grupo: null, cambio: null },
+      { fecha: '15/07/2026', motivo: 'Nómina', grupo: 'BAJ · AO · PM', cambio: 'Se anticipa PM a martes y se recorre BAJ.' },
+      { fecha: '30/07/2026', motivo: 'Nómina', grupo: 'TGO · SL · SEV', cambio: 'Se recorren para el viernes.' },
+      { fecha: '14/08/2026', motivo: 'Nómina', grupo: null, cambio: null },
+      { fecha: '27/08/2026', motivo: 'Nómina', grupo: 'TGO · SL · SEV', cambio: 'Se recorren para el viernes.' },
+      { fecha: '11/09/2026', motivo: 'Nómina', grupo: null, cambio: null },
+      { fecha: '15/09/2026', motivo: 'Día de la Independencia', grupo: 'AA · BL · VE · GE', cambio: 'Se recorren para el jueves.' },
+      { fecha: '16/09/2026', motivo: 'Día de la Independencia', grupo: 'BAJ · AO · PM', cambio: 'Se recorren para el jueves.' },
+      { fecha: '29/09/2026', motivo: 'Nómina', grupo: 'AA · BL · VE · GE', cambio: 'Se recorren un día todos los pagos.' },
+      { fecha: '14/10/2026', motivo: 'Nómina', grupo: 'BAJ · AO · PM', cambio: 'Se recorren para el jueves.' },
+      { fecha: '29/10/2026', motivo: 'Nómina', grupo: 'TGO · SL · SEV', cambio: 'Se recorren para el viernes.' },
+      { fecha: '12/11/2026', motivo: 'Nómina', grupo: 'TGO · SL · SEV', cambio: 'Se recorren para el viernes.' },
+      { fecha: '16/11/2026', motivo: 'Día de la Revolución', grupo: null, cambio: null },
+      { fecha: '10/12/2026', motivo: 'Nómina', grupo: 'TGO · SL · SEV', cambio: 'Se recorren para el viernes.' },
+      { fecha: '18/12/2026', motivo: 'Aguinaldo', grupo: null, cambio: null },
+      { fecha: '24/12/2026', motivo: 'Día libre o guardia', grupo: 'TGO · SL · SEV', cambio: null },
+      { fecha: '25/12/2026', motivo: 'Navidad', grupo: null, cambio: null }
+    ],
+    glosario: [
+      { termino: 'SAP', definicion: 'Sistema donde debe quedar registrada y autorizada toda factura antes de poder pagarse; el portal de proveedores es solo un paso previo.' },
+      { termino: 'Carátula bancaria', definicion: 'Documento emitido por el banco que confirma titular, CLABE y datos de una cuenta; se pide vigente (no mayor a 2–3 meses según el caso).' },
+      { termino: 'CLABE', definicion: 'Clave Bancaria Estandarizada de 18 dígitos que identifica una cuenta en México.' },
+      { termino: 'CEP', definicion: 'Comprobante Electrónico de Pago; documento que confirma que una transferencia SPEI se realizó.' },
+      { termino: 'PEP', definicion: 'Elemento del plan usado en SAP para asociar un pago a un proyecto o presupuesto de activo fijo.' },
+      { termino: 'SWIFT / BIC', definicion: 'Código internacional que identifica al banco receptor en un pago al extranjero.' },
+      { termino: 'ABA', definicion: 'Número de ruta bancaria usado en pagos a Estados Unidos (equivalente a un SWIFT local).' },
+      { termino: 'IBAN', definicion: 'Número de cuenta bancaria internacional usado en pagos a Europa.' },
+      { termino: 'Morralla', definicion: 'Lote semanal de pagos menores que se envía de forma conjunta, en lugar de uno por uno.' },
+      { termino: 'RAP / CIE', definicion: 'Mecanismos bancarios de depósito referenciado que usan algunos grandes facturadores; en estos casos el soporte del pago es el contrato o la factura, no una carátula bancaria.' },
+      { termino: 'Datos Maestros', definicion: 'Área responsable de capturar y mantener actualizada la información de proveedores y sus cuentas bancarias en SAP.' }
+    ],
+    faq: [
+      { pregunta: 'Mi proveedor se dio de alta hoy, ¿puedo pedir que se le pague urgente?', respuesta: 'No. No se procesan pagos urgentes a proveedores dados de alta el mismo día; primero debe completarse la validación.' },
+      { pregunta: 'Mi factura ya está en el portal de proveedores, ¿ya puede pagarse?', respuesta: 'No necesariamente. Que la factura esté en el portal es solo un paso; también debe estar correctamente registrada y autorizada en SAP.' },
+      { pregunta: '¿Qué pasa si mi solicitud llega incompleta o después del corte?', respuesta: 'Pasa automáticamente al siguiente ciclo semanal, salvo que cuente con una autorización formal de excepción por parte de Contraloría o la Dirección de Finanzas.' },
+      { pregunta: '¿Puedo dar de alta una cuenta bancaria un día distinto al lunes?', respuesta: 'No; las altas de cuentas bancarias se procesan exclusivamente los lunes por la tarde.' },
+      { pregunta: '¿Puedo pagar un reembolso a la cuenta de un familiar del empleado?', respuesta: 'No. Está prohibido; el pago debe ir a la cuenta del propio empleado registrada en SAP.' }
+    ]
+  };
+
+  // Modulos sin contenido real todavia (plantillas del documento original) --
+  // se muestran con un aviso explicito, sin texto de relleno inventado.
+  MODULES['activo-fijo'] = {
+    meta: { tituloCorto: 'Activo Fijo', tituloLargo: 'Procedimientos de Activo Fijo', subtitulo: 'Grupo Ventura', version: null, fechaActualizacion: null, contacto: null },
+    pendiente: true
+  };
+  MODULES.consolidacion = {
+    meta: { tituloCorto: 'Consolidación', tituloLargo: 'Procedimientos de Consolidación', subtitulo: 'Grupo Ventura', version: null, fechaActualizacion: null, contacto: null },
+    pendiente: true
+  };
+
+  var MODULES_ORDEN = [
+    { id: 'tesoreria', titulo: 'Tesorería' },
+    { id: 'activo-fijo', titulo: 'Activo Fijo' },
+    { id: 'consolidacion', titulo: 'Consolidación' }
+  ];
+
+  // =====================================================================
+  // Fechas -- portado tal cual de Lineamientos2.json (proximoCorteSemanal/
+  // proximaExcepcion/diasEntre), pedido explicito del usuario (calculo en
+  // vivo, no solo tabla estatica). Sin dependencia del motor de UI
+  // original -- son funciones puras sobre Date.
+  // =====================================================================
+  function parseFechaDDMMYYYY(str) {
+    var partes = str.split('/').map(Number);
+    var d = partes[0], m = partes[1], y = partes[2];
+    if (!d || !m || !y) return null;
+    return new Date(y, m - 1, d);
+  }
+  function formatFechaCorta(date) {
+    return date.toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' });
+  }
+  function proximoCorteSemanal(now, cortes) {
+    if (!cortes || !cortes.length) return null;
+    function reglaPara(dow) { return cortes.filter(function (c) { return c.dias.indexOf(dow) >= 0; })[0]; }
+    var dow = now.getDay();
+    var mins = now.getHours() * 60 + now.getMinutes();
+    var reglaHoy = reglaPara(dow);
+    if (reglaHoy && mins < reglaHoy.hora) return { fecha: new Date(now), etiqueta: reglaHoy.etiqueta, esHoy: true };
+    var next = new Date(now);
+    for (var i = 0; i < 8; i++) {
+      next.setDate(next.getDate() + 1);
+      var r = reglaPara(next.getDay());
+      if (r) return { fecha: next, etiqueta: r.etiqueta, esHoy: false };
+    }
+    return null;
+  }
+  function proximaExcepcion(lista, now) {
+    if (!lista || !lista.length) return null;
+    var hoy = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var futuras = lista
+      .map(function (e) { return Object.assign({}, e, { d: parseFechaDDMMYYYY(e.fecha) }); })
+      .filter(function (e) { return e.d && e.d >= hoy; })
+      .sort(function (a, b) { return a.d - b.d; });
+    return futuras[0] || null;
+  }
+  function diasEntre(a, b) { return Math.round((b - a) / 86400000); }
+
+  // =====================================================================
+  // Render -- patron TESO (VEVA.dom.el), tokens de color ya usados en el
+  // resto de la app (#635bff acento, #e6ebf1 bordes, amber/emerald/red ya
+  // usados en View_Pagos.html). Nada de HTML crudo ni CSS/fuentes por CDN.
+  // =====================================================================
+  var COLOR_GRID = {
+    blue: { bg: 'bg-[#635bff]/10', text: 'text-[#4c3fe0]', border: 'border-[#635bff]/20' },
+    amber: { bg: 'bg-amber-50', text: 'text-amber-700', border: 'border-amber-200' },
+    teal: { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-100' },
+    red: { bg: 'bg-red-50', text: 'text-red-600', border: 'border-red-100' }
+  };
+
+  function renderLedgerCard(modulo) {
+    if (!modulo.cortes) return null;
+    var now = new Date();
+    var corte = proximoCorteSemanal(now, modulo.cortes);
+    var exc = proximaExcepcion(modulo.calendarioExcepciones, now);
+    var hoy = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var diasFaltan = exc ? diasEntre(hoy, exc.d) : null;
+
+    var izq = VEVA.dom.el('div', {}, [
+      VEVA.dom.el('div', { class: 'text-[10.5px] font-bold uppercase tracking-widest text-white/50 mb-1' }, ['Próxima excepción de calendario']),
+      exc
+        ? VEVA.dom.el('div', {}, [
+            VEVA.dom.el('div', { class: 'font-mono text-[16px] font-semibold' }, [exc.fecha + ' · ' + exc.motivo]),
+            VEVA.dom.el('div', { class: 'text-white/60 text-[11.5px] mt-1' }, [(exc.grupo ? 'Afecta a: ' + exc.grupo : 'Sin afectación al ciclo regular') + (exc.cambio ? ' — ' + exc.cambio : '')])
+          ])
+        : VEVA.dom.el('div', { class: 'text-white/60 text-[13px]' }, ['No hay excepciones próximas registradas.'])
+    ]);
+    var der = diasFaltan != null ? VEVA.dom.el('div', { class: 'text-right flex-shrink-0' }, [
+      VEVA.dom.el('div', { class: 'font-mono text-2xl font-bold' }, [diasFaltan === 0 ? 'HOY' : String(diasFaltan)]),
+      VEVA.dom.el('div', { class: 'text-[9.5px] uppercase tracking-widest text-white/50' }, [diasFaltan === 0 ? '' : 'días'])
+    ]) : null;
+
+    var bloqueCorte = corte ? VEVA.dom.el('div', { class: 'mb-4' }, [
+      VEVA.dom.el('div', { class: 'flex items-center justify-between mb-1.5' }, [
+        VEVA.dom.el('span', { class: 'text-[10.5px] font-bold uppercase tracking-widest text-white/50' }, ['Próximo corte de pagos']),
+        VEVA.dom.el('span', { class: 'text-[9.5px] font-bold uppercase tracking-widest bg-white/10 px-2 py-0.5 rounded-full' }, ['En vivo'])
+      ]),
+      VEVA.dom.el('div', { class: 'font-mono text-[22px] font-semibold capitalize' }, [corte.esHoy ? 'Hoy, ' + formatFechaCorta(corte.fecha) : formatFechaCorta(corte.fecha)]),
+      VEVA.dom.el('div', { class: 'text-white/70 text-[12.5px] mt-0.5' }, [corte.etiqueta])
+    ]) : null;
+
+    return VEVA.dom.el('div', { class: 'rounded-2xl p-5 mb-5', style: 'background:linear-gradient(135deg,#635bff,#3d2fb3)' }, [
+      bloqueCorte,
+      VEVA.dom.el('div', { class: 'flex items-start justify-between gap-4 pt-1 border-t border-white/10' + (bloqueCorte ? ' mt-1' : '') }, [izq, der].filter(Boolean))
+    ].filter(Boolean));
+  }
+
+  function renderBloque(bloque) {
+    if (bloque.tipo === 'texto') {
+      return VEVA.dom.el('p', { class: 'text-[13px] text-[#425466] leading-relaxed mb-3' }, [bloque.texto]);
+    }
+    if (bloque.tipo === 'nota') {
+      return VEVA.dom.el('div', { class: 'mb-3' }, [
+        VEVA.dom.el('div', { class: 'text-[12.5px] font-bold text-[#0a2540] mb-0.5' }, [bloque.titulo]),
+        bloque.texto ? VEVA.dom.el('p', { class: 'text-[13px] text-[#425466] leading-relaxed' }, [bloque.texto]) : null
+      ].filter(Boolean));
+    }
+    if (bloque.tipo === 'alerta') {
+      var esAdvertencia = bloque.variante === 'advertencia';
+      return VEVA.dom.el('div', { class: 'rounded-lg border p-3 mb-3 ' + (esAdvertencia ? 'bg-red-50 border-red-100' : 'bg-[#635bff]/5 border-[#635bff]/20') }, [
+        VEVA.dom.el('div', { class: 'text-[12.5px] font-bold mb-0.5 ' + (esAdvertencia ? 'text-red-700' : 'text-[#4c3fe0]') }, [bloque.titulo]),
+        bloque.texto ? VEVA.dom.el('p', { class: 'text-[12.5px] leading-relaxed ' + (esAdvertencia ? 'text-red-700/90' : 'text-[#4c3fe0]/90') }, [bloque.texto]) : null
+      ].filter(Boolean));
+    }
+    if (bloque.tipo === 'lista') {
+      return VEVA.dom.el('div', { class: 'mb-3' }, [
+        bloque.titulo ? VEVA.dom.el('div', { class: 'text-[12.5px] font-bold text-[#0a2540] mb-1.5' }, [bloque.titulo]) : null,
+        VEVA.dom.el('ul', { class: 'list-disc pl-4 space-y-1' }, bloque.items.map(function (it) {
+          return VEVA.dom.el('li', { class: 'text-[13px] text-[#425466] leading-relaxed' }, [it]);
+        }))
+      ].filter(Boolean));
+    }
+    if (bloque.tipo === 'checklist') {
+      return VEVA.dom.el('div', { class: 'mb-3 space-y-1.5' }, bloque.items.map(function (it) {
+        return VEVA.dom.el('div', { class: 'flex items-start gap-2' }, [
+          VEVA.icon('check-circle', 14, 'text-[#c3c9d3] flex-shrink-0 mt-0.5'),
+          VEVA.dom.el('span', { class: 'text-[13px] text-[#425466] leading-relaxed' }, [it])
+        ]);
+      }));
+    }
+    if (bloque.tipo === 'timebox') {
+      return VEVA.dom.el('div', { class: 'space-y-1.5 mb-3' }, bloque.items.map(function (it) {
+        return VEVA.dom.el('div', { class: 'flex items-center gap-3 border border-amber-200 rounded-lg px-3 py-2' }, [
+          VEVA.dom.el('span', { class: 'font-mono text-[12.5px] font-bold text-amber-700 bg-amber-50 px-2 py-1 rounded flex-shrink-0' }, [it.hora]),
+          VEVA.dom.el('span', { class: 'text-[13px] text-[#425466]' }, [it.texto])
+        ]);
+      }));
+    }
+    if (bloque.tipo === 'grid') {
+      return VEVA.dom.el('div', { class: 'grid gap-2.5 mb-3', style: 'grid-template-columns:repeat(auto-fit,minmax(200px,1fr))' }, bloque.items.map(function (it) {
+        var c = COLOR_GRID[it.color] || COLOR_GRID.blue;
+        return VEVA.dom.el('div', { class: 'rounded-lg border p-3 ' + c.bg + ' ' + c.border }, [
+          VEVA.dom.el('div', { class: 'text-[12px] font-bold mb-1 ' + c.text }, [it.titulo]),
+          VEVA.dom.el('div', { class: 'text-[12px] leading-relaxed ' + c.text + '/90' }, [it.texto])
+        ]);
+      }));
+    }
+    if (bloque.tipo === 'tabla-calendario') {
+      return renderTablaCalendario(state.calendarioActivo || []);
+    }
+    return null;
+  }
+
+  function renderTablaCalendario(excepciones) {
+    var head = ['Fecha', 'Motivo', 'Sociedades afectadas', 'Cambio'];
+    return VEVA.dom.el('div', { class: 'border border-[#e6ebf1] rounded-lg overflow-hidden mb-3' }, [
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [
+        VEVA.dom.el('table', { class: 'w-full border-collapse', style: 'min-width:520px' }, [
+          VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', {}, head.map(function (h) {
+            return VEVA.dom.el('th', { class: 'bg-[#f6f9fc] border-b border-[#e6ebf1] px-2.5 py-1.5 text-[9.5px] font-bold uppercase tracking-wide text-[#8792a2] text-left whitespace-nowrap' }, [h]);
+          }))]),
+          VEVA.dom.el('tbody', {}, excepciones.map(function (e) {
+            return VEVA.dom.el('tr', { class: 'border-b border-[#f0f2f6] last:border-0' }, [
+              VEVA.dom.el('td', { class: 'px-2.5 py-1.5 text-[11.5px] font-mono text-[#697386] whitespace-nowrap' }, [e.fecha]),
+              VEVA.dom.el('td', { class: 'px-2.5 py-1.5 text-[12px] font-semibold' }, [e.motivo]),
+              VEVA.dom.el('td', { class: 'px-2.5 py-1.5 text-[11.5px] text-[#697386]' }, [e.grupo || '—']),
+              VEVA.dom.el('td', { class: 'px-2.5 py-1.5 text-[11.5px] text-[#697386]' }, [e.cambio || '—'])
+            ]);
+          }))
+        ])
+      ])
+    ]);
+  }
+
+  function renderSeccion(seccion) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-4 mb-3.5' }, [
+      VEVA.dom.el('div', { class: 'flex items-center gap-2 mb-3' }, [
+        VEVA.icon(seccion.icono, 15, 'text-[#635bff] flex-shrink-0'),
+        VEVA.dom.el('span', { class: 'font-mono text-[10.5px] text-[#c3c9d3]' }, [seccion.numero]),
+        VEVA.dom.el('h3', { class: 'text-[14px] font-bold text-[#0a2540]' }, [seccion.titulo])
+      ]),
+      VEVA.dom.el('div', {}, seccion.bloques.map(renderBloque).filter(Boolean))
+    ]);
+  }
+
+  function renderResumenEjecutivo(items) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-4 mb-3.5' }, [
+      VEVA.dom.el('h3', { class: 'text-[12px] font-bold uppercase tracking-wide text-[#8792a2] mb-2' }, ['Resumen ejecutivo']),
+      VEVA.dom.el('ul', { class: 'list-disc pl-4 space-y-1.5' }, items.map(function (t) {
+        return VEVA.dom.el('li', { class: 'text-[13px] text-[#425466] leading-relaxed' }, [t]);
+      }))
+    ]);
+  }
+
+  function renderStats(stats) {
+    return VEVA.dom.el('div', { class: 'grid gap-2.5 mb-3.5', style: 'grid-template-columns:repeat(auto-fit,minmax(140px,1fr))' }, stats.map(function (s) {
+      return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-3 text-center' }, [
+        VEVA.dom.el('div', { class: 'font-mono text-[18px] font-bold text-[#0a2540]' }, [s.valor]),
+        VEVA.dom.el('div', { class: 'text-[10.5px] text-[#8792a2] uppercase tracking-wide mt-0.5' }, [s.etiqueta])
+      ]);
+    }));
+  }
+
+  function renderTablaSociedades(tabla) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden mb-3.5' }, [
+      VEVA.dom.el('div', { class: 'px-4 pt-3 pb-1' }, [VEVA.dom.el('h3', { class: 'text-[12px] font-bold uppercase tracking-wide text-[#8792a2]' }, ['Día de pago por sociedad'])]),
+      VEVA.dom.el('div', { class: 'overflow-x-auto' }, [
+        VEVA.dom.el('table', { class: 'w-full border-collapse', style: 'min-width:480px' }, [
+          VEVA.dom.el('thead', {}, [VEVA.dom.el('tr', {}, tabla.columnas.map(function (h) {
+            return VEVA.dom.el('th', { class: 'border-b border-[#e6ebf1] px-4 py-1.5 text-[9.5px] font-bold uppercase tracking-wide text-[#8792a2] text-left whitespace-nowrap' }, [h]);
+          }))]),
+          VEVA.dom.el('tbody', {}, tabla.filas.map(function (fila) {
+            return VEVA.dom.el('tr', { class: 'border-b border-[#f0f2f6] last:border-0' }, fila.map(function (v, i) {
+              return VEVA.dom.el('td', { class: 'px-4 py-1.5 text-[12px]' + (i === 0 ? ' font-semibold' : ' text-[#697386]') }, [v]);
+            }));
+          }))
+        ])
+      ])
+    ]);
+  }
+
+  function renderGlosario(glosario) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-4 mb-3.5' }, [
+      VEVA.dom.el('h3', { class: 'text-[12px] font-bold uppercase tracking-wide text-[#8792a2] mb-2.5' }, ['Glosario']),
+      VEVA.dom.el('div', { class: 'space-y-2.5' }, glosario.map(function (g) {
+        return VEVA.dom.el('div', {}, [
+          VEVA.dom.el('div', { class: 'text-[12.5px] font-bold text-[#0a2540]' }, [g.termino]),
+          VEVA.dom.el('div', { class: 'text-[12.5px] text-[#697386] leading-relaxed' }, [g.definicion])
+        ]);
+      }))
+    ]);
+  }
+
+  function renderFaq(faq) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl p-4 mb-3.5' }, [
+      VEVA.dom.el('h3', { class: 'text-[12px] font-bold uppercase tracking-wide text-[#8792a2] mb-2.5' }, ['Preguntas frecuentes']),
+      VEVA.dom.el('div', { class: 'space-y-3' }, faq.map(function (f) {
+        return VEVA.dom.el('div', {}, [
+          VEVA.dom.el('div', { class: 'text-[13px] font-bold text-[#0a2540] mb-0.5' }, [f.pregunta]),
+          VEVA.dom.el('div', { class: 'text-[13px] text-[#425466] leading-relaxed' }, [f.respuesta])
+        ]);
+      }))
+    ]);
+  }
+
+  function renderTabs() {
+    return VEVA.dom.el('div', { class: 'flex gap-2 flex-wrap border-b border-[#e6ebf1] mb-4' }, MODULES_ORDEN.map(function (m) {
+      var active = m.id === state.activeModulo;
+      return VEVA.dom.el('div', {
+        class: 'cursor-pointer px-4 py-2.5 text-[13px] font-semibold border-b-2 ' + (active ? 'text-[#0a2540] border-[#635bff]' : 'text-[#697386] border-transparent hover:text-[#0a2540]'),
+        onClick: function () { state.activeModulo = m.id; redraw(); }
+      }, [m.titulo]);
+    }));
+  }
+
+  function renderModuloPendiente(modulo) {
+    return VEVA.dom.el('div', { class: 'bg-white border border-dashed border-[#e6ebf1] rounded-xl p-10 text-center' }, [
+      VEVA.icon('file-text', 28, 'text-[#c3c9d3] mx-auto mb-3'),
+      VEVA.dom.el('p', { class: 'text-[14px] font-bold text-[#0a2540] mb-1' }, [modulo.meta.tituloLargo]),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386]' }, ['Este módulo todavía no tiene contenido real publicado.'])
+    ]);
+  }
+
+  function _redrawInner() {
+    var root = document.getElementById('view-lineamientos-root');
+    if (!root) return;
+    VEVA.dom.clear(root);
+
+    var modulo = MODULES[state.activeModulo];
+    state.calendarioActivo = modulo.calendarioExcepciones;
+
+    root.appendChild(VEVA.dom.el('div', {}, [
+      VEVA.dom.el('h2', { class: 'text-2xl font-bold tracking-tight' }, ['Lineamientos']),
+      VEVA.dom.el('p', { class: 'text-[13px] text-[#697386] mt-0.5 mb-4' }, ['Manual de referencia de procesos de Grupo Ventura. Solo lectura.'])
+    ]));
+    root.appendChild(renderTabs());
+
+    if (modulo.pendiente) {
+      root.appendChild(renderModuloPendiente(modulo));
+      return;
+    }
+
+    var ledger = renderLedgerCard(modulo);
+    if (ledger) root.appendChild(ledger);
+    root.appendChild(renderResumenEjecutivo(modulo.resumenEjecutivo));
+    root.appendChild(renderStats(modulo.statsRapidas));
+    root.appendChild(renderTablaSociedades(modulo.diasPorSociedad));
+    modulo.secciones.forEach(function (s) { root.appendChild(renderSeccion(s)); });
+    root.appendChild(renderGlosario(modulo.glosario));
+    root.appendChild(renderFaq(modulo.faq));
+  }
+
+  function redraw() {
+    var mainScroll = document.getElementById('veva-main');
+    var scrollTop = mainScroll ? mainScroll.scrollTop : 0;
+    _redrawInner();
+    if (mainScroll) mainScroll.scrollTop = scrollTop;
+  }
+
+  VEVA.registerView('lineamientos', {
+    render: function (mount) {
+      mount.appendChild(VEVA.dom.el('div', { id: 'view-lineamientos-root', class: 'space-y-0' }, []));
+      redraw();
+    },
+    destroy: function () { /* sin listeners globales que limpiar */ }
+  });
+})();
+</script>
