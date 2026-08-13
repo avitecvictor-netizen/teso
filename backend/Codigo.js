@@ -47,7 +47,15 @@ function include(filename) {
 // acceso), asi que basta con llamarla directo, sin replicar el criterio
 // fail-open de otras partes del modulo.
 var VISTA_ROLES_PERMITIDOS = {
-  'posicion': ['Tesorería'],
+  // 'Auditor' (2026-08-13, pedido del usuario): rol ya existente en
+  // ROLES_VALIDOS (Svc_Pagos.js) pero sin ningun proposito real hasta
+  // ahora ("fantasma", identificado en la auditoria de roles del
+  // 2026-08-11) -- se reutiliza para el caso de acceso de solo lectura a
+  // Posicion Bancaria (ej. usuarios de otra organizacion, como
+  // venturacp.com, que solo necesitan VER la posicion, nunca actuar).
+  // getBankingPosition (unica funcion gateada a esta vista) es de solo
+  // lectura -- no expone ninguna accion de escritura a este rol nuevo.
+  'posicion': ['Tesorería', 'Auditor'],
   'cobranza': ['Tesorería'],
   'reporte-fechas': ['Tesorería'],
   'carga-mov': ['Tesorería'],
