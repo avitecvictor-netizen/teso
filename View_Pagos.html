@@ -99,7 +99,13 @@
     catalogoCuentas: [],
     conciliacionData: null, conciliacionLoading: false, conciliacionExpanded: {},
     conciliacionMatchOpen: {}, conciliacionCandidatos: {}, conciliacionCandidatosLoading: {}, conciliacionSeleccion: {},
-    comprobantesData: null, comprobantesLoading: false, comprobantesSeleccion: {}, comprobantesPanelAbierto: null
+    comprobantesData: null, comprobantesLoading: false, comprobantesSeleccion: {}, comprobantesPanelAbierto: null,
+    // Filtro de Comprobantes (2026-08-12, Opción A del mockup aprobado
+    // por el usuario): cerrado por defecto, filtra en cliente sobre los
+    // datos ya cargados (mismo campo aplicadoFecha que ya se muestra en
+    // la tabla) -- sin tocar backend.
+    comprobantesFiltroAbierto: false,
+    comprobantesFiltros: { fechaDesde: '', fechaHasta: '', sociedad: '', busqueda: '' }
   };
 
   function fmtMonto(n) { return '$' + Number(n || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -954,6 +960,8 @@
     }
 
     var esFaseResolver = (tab === 'banca');
+    var campoPor = _porFaseCampo(tab);
+    var porCell = celdaPor(campoPor ? l[campoPor] : null);
     var filaBase = [
       cb,
       provCell,
@@ -962,7 +970,7 @@
       VEVA.dom.el('span', { class: 'text-right text-[12px] font-semibold' }, [fmtMontoDivisa(l.monto, l.moneda)]),
       authCell
     ];
-    var filaResto = esFaseResolver ? [celdaPositivo, celdaNegativo, commentCell] : [statusCell, commentCell];
+    var filaResto = esFaseResolver ? [celdaPositivo, celdaNegativo, porCell, commentCell] : [statusCell, porCell, commentCell];
     return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc]', style: colHeadStyle(tab) }, filaBase.concat(filaResto));
   }
 
@@ -981,17 +989,21 @@
     cb.checked = !!l.checked;
     cb.addEventListener('change', function (e) { toggleLineChecked(l, e.target.checked); });
 
+    // Bug reportado (2026-08-12): Referencia y Descripción vivian juntas
+    // como segunda linea de esta misma celda, lo que la hacia el doble de
+    // alta que las demas filas de la tabla. Referencia ahora es su propia
+    // columna (mismo patron que ya usan Contabilidad/Tesorería/Banca,
+    // ver renderLineRow) -- Descripción se conserva solo en el title
+    // (hover) del proveedor para no agregar una columna mas a un grid ya
+    // de por si apretado.
     var provCell = VEVA.dom.el('div', { class: 'min-w-0' }, []);
     if (mostrarProveedor) {
-      var detalle = [l.referencia, l.desc].filter(Boolean).join(' · ');
-      provCell = VEVA.dom.el('div', { class: 'min-w-0' }, [
-        VEVA.dom.el('div', { class: 'flex items-baseline gap-1.5' }, [
-          l.numeroProveedor ? VEVA.dom.el('span', { class: 'font-mono text-[9.5px] text-[#8792a2] flex-shrink-0' }, [String(l.numeroProveedor)]) : null,
-          VEVA.dom.el('span', { class: 'text-[12px] font-semibold truncate', title: l.proveedor }, [l.proveedor || '—'])
-        ].filter(Boolean)),
-        detalle ? VEVA.dom.el('div', { class: 'truncate text-[10.5px] text-[#697386]', title: detalle }, [detalle]) : null
+      provCell = VEVA.dom.el('div', { class: 'flex items-baseline gap-1.5 min-w-0' }, [
+        l.numeroProveedor ? VEVA.dom.el('span', { class: 'font-mono text-[9.5px] text-[#8792a2] flex-shrink-0' }, [String(l.numeroProveedor)]) : null,
+        VEVA.dom.el('span', { class: 'text-[12px] font-semibold truncate', title: l.desc ? (l.proveedor + ' — ' + l.desc) : l.proveedor }, [l.proveedor || '—'])
       ].filter(Boolean));
     }
+    var referenciaCell = VEVA.dom.el('span', { class: 'truncate text-[11px] text-[#697386]', title: l.referencia }, [l.referencia ? String(l.referencia) : '—']);
 
     var montoCell = VEVA.dom.el('span', { class: 'text-right text-[12px] font-semibold' }, [fmtMontoDivisa(l.monto, l.moneda)]);
 
@@ -1072,13 +1084,15 @@
       commentCell = notaInput;
     }
 
+    var porCell = celdaPor(l.subidoPor);
+
     return VEVA.dom.el('div', { class: 'grid gap-2 items-center px-2.5 py-1.5 border-b border-[#f6f9fc]', style: COL_HEAD_STYLE_APLICADO }, [
-      cb, provCell, montoCell, cuentaCell, sePagaEnCell, tcCell, equivCell, celdasA.positivo, celdasA.negativo, commentCell
+      cb, provCell, referenciaCell, montoCell, cuentaCell, sePagaEnCell, tcCell, equivCell, celdasA.positivo, celdasA.negativo, porCell, commentCell
     ]);
   }
 
-  var COL_HEAD_STYLE = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 90px 1fr';
-  var COL_HEAD_STYLE_RESOLVER = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 60px 60px 1fr';
+  var COL_HEAD_STYLE = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 90px 80px 1fr';
+  var COL_HEAD_STYLE_RESOLVER = 'grid-template-columns:22px 1.2fr 90px 1fr 110px 130px 60px 60px 80px 1fr';
   // Rediseño de Aplicado (2026-08-02, aprobado por el usuario vía mockup):
   // Cuenta/Se paga en/TC/≈MXN eran 4 controles amontonados en la misma
   // celda de "Autorizacion" (110px) que Banca reusaba sin necesitarlos --
@@ -1087,7 +1101,7 @@
   // Banca sigue usando sin cambios): checkbox, Proveedor/Referencia
   // (fusionados), Monto, Cuenta, Se paga en, TC, ≈MXN, Aplicar, No
   // pagado, Comentario.
-  var COL_HEAD_STYLE_APLICADO = 'grid-template-columns:22px 1.3fr 95px 100px 85px 60px 85px 110px 60px 1fr';
+  var COL_HEAD_STYLE_APLICADO = 'grid-template-columns:22px 1.1fr 90px 95px 100px 85px 60px 85px 110px 60px 80px 1fr';
   function colHeadStyle(tab) { return tab === 'aplicado' ? COL_HEAD_STYLE_APLICADO : (tab === 'banca' ? COL_HEAD_STYLE_RESOLVER : COL_HEAD_STYLE); }
   /** Envuelve cada etiqueta en su propio <span> antes de pasarla como hijo
    * de un contenedor `grid` -- hallazgo real 2026-08-02 (reportado por el
@@ -1114,14 +1128,33 @@
   function celdaHead(texto, claseExtra) {
     return VEVA.dom.el('span', { class: 'truncate whitespace-nowrap min-w-0' + (claseExtra ? ' ' + claseExtra : ''), title: texto || null }, [texto]);
   }
+
+  /** Columna "Por" (2026-08-12, pedido del usuario): quien completo el
+   * paso que trajo la partida a la pestaña actual -- dato que YA existia
+   * en PARTIDAS_PAGO (REVISADO_POR/AUTORIZADO_POR/LIBERADO_POR/SUBIDO_POR)
+   * pero nunca se mostraba en la tabla. Se muestra solo la parte local
+   * del correo (antes de @) para no ensanchar la columna -- el correo
+   * completo queda en el title al pasar el mouse. Contabilidad no tiene
+   * paso previo (es la carga misma), por eso no aplica ahi -- se resuelve
+   * con un guion. */
+  function _porFaseCampo(tab) {
+    if (tab === 'tesoreria') return 'revisadoPor';
+    if (tab === 'liberacion2') return 'autorizadoPor';
+    if (tab === 'banca') return 'liberadoPor';
+    return null;
+  }
+  function celdaPor(email) {
+    var corto = email ? String(email).split('@')[0] : '';
+    return VEVA.dom.el('span', { class: 'truncate text-[10.5px] text-[#8792a2]', title: email || null }, [corto || '—']);
+  }
   function renderColHead(tab) {
     var cols;
     if (tab === 'aplicado') {
-      cols = [celdaHead(''), celdaHead('Proveedor / Referencia'), celdaHead('Monto', 'text-right'), celdaHead('Cuenta'), celdaHead('Se paga en'), celdaHead('TC'), celdaHead('≈ MXN'), celdaHead('Aplicar'), celdaHead('No pagado'), celdaHead('Comentario')];
+      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Monto', 'text-right'), celdaHead('Cuenta'), celdaHead('Se paga en'), celdaHead('TC'), celdaHead('≈ MXN'), celdaHead('Aplicar'), celdaHead('No pagado'), celdaHead('Por'), celdaHead('Comentario')];
     } else if (tab === 'banca') {
-      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Subir'), celdaHead('Rechazar'), celdaHead('Comentario')];
+      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Subir'), celdaHead('Rechazar'), celdaHead('Por'), celdaHead('Comentario')];
     } else {
-      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Comentario')];
+      cols = [celdaHead(''), celdaHead('Proveedor'), celdaHead('Referencia'), celdaHead('Descripción'), celdaHead('Monto', 'text-right'), celdaHead('Autorización'), celdaHead('Estatus'), celdaHead('Por'), celdaHead('Comentario')];
     }
     return VEVA.dom.el('div', { class: 'grid gap-2 px-2.5 py-1 bg-[#f6f9fc] border-b border-[#e6ebf1] text-[8.5px] font-bold text-[#8792a2] uppercase tracking-wide', style: colHeadStyle(tab) }, cols);
   }
@@ -1976,11 +2009,82 @@
   // independiente de conciliacion a proposito. Seleccion multiple + "1
   // archivo consolidado" para el caso real (PDF del banco con resumen +
   // varios pagos individuales adentro).
+  /** Aplica state.comprobantesFiltros sobre state.comprobantesData --
+   * filtro en cliente (dataset ya cargado completo), sobre aplicadoFecha
+   * (unica fecha que ya trae cada fila), sociedad y busqueda libre
+   * (proveedor/folio). */
+  function _comprobantesFiltrados() {
+    var f = state.comprobantesFiltros;
+    return (state.comprobantesData || []).filter(function (p) {
+      if (f.fechaDesde && (!p.aplicadoFecha || String(p.aplicadoFecha).slice(0, 10) < f.fechaDesde)) return false;
+      if (f.fechaHasta && (!p.aplicadoFecha || String(p.aplicadoFecha).slice(0, 10) > f.fechaHasta)) return false;
+      if (f.sociedad && p.sociedad !== f.sociedad) return false;
+      if (f.busqueda) {
+        var q = f.busqueda.toLowerCase();
+        var texto = [p.proveedor, p.folio].filter(Boolean).join(' ').toLowerCase();
+        if (texto.indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+  }
+
+  function _comprobantesFiltroActivo() {
+    var f = state.comprobantesFiltros;
+    return !!(f.fechaDesde || f.fechaHasta || f.sociedad || f.busqueda);
+  }
+
+  /** Chip "Filtrar" (Opción A del mockup, aprobada por el usuario):
+   * cerrado por defecto, no compite con la tabla; cuando hay un filtro
+   * activo el chip lo muestra para que nunca se pierda de vista que se
+   * esta viendo un subconjunto (punto de transparencia pedido por el
+   * usuario). */
+  function renderComprobantesFiltroChip() {
+    var f = state.comprobantesFiltros;
+    var activo = _comprobantesFiltroActivo();
+    var resumen = activo ? [f.fechaDesde, f.fechaHasta].filter(Boolean).map(fmtFechaCortaLocal).join('–') : '';
+    var chip = VEVA.dom.el('button', {
+      class: 'inline-flex items-center gap-1.5 border rounded-full px-3 py-1.5 text-[12px] font-semibold ' + (activo ? 'border-[#635bff] text-[#635bff]' : 'border-[#e6ebf1] text-[#425466] hover:border-[#635bff]'),
+      onClick: function () { state.comprobantesFiltroAbierto = !state.comprobantesFiltroAbierto; redraw(); }
+    }, [
+      activo ? VEVA.dom.el('span', { class: 'w-1.5 h-1.5 rounded-full bg-[#635bff]' }, []) : null,
+      'Filtrar' + (resumen ? ' · ' + resumen : '')
+    ].filter(Boolean));
+
+    var children = [chip];
+    if (state.comprobantesFiltroAbierto) {
+      function campo(label, input) { return VEVA.dom.el('div', { class: 'flex flex-col gap-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold uppercase tracking-wide text-[#8792a2]' }, [label]), input]); }
+      var inputDesde = VEVA.dom.el('input', { type: 'date', class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]' }, []);
+      inputDesde.value = f.fechaDesde;
+      inputDesde.addEventListener('change', function (e) { f.fechaDesde = e.target.value; redraw(); });
+      var inputHasta = VEVA.dom.el('input', { type: 'date', class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]' }, []);
+      inputHasta.value = f.fechaHasta;
+      inputHasta.addEventListener('change', function (e) { f.fechaHasta = e.target.value; redraw(); });
+      var soc = {};
+      (state.comprobantesData || []).forEach(function (p) { if (p.sociedad) soc[p.sociedad] = true; });
+      var selSociedad = VEVA.dom.el('select', { class: 'border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff] min-w-[130px]' },
+        [VEVA.dom.el('option', { value: '' }, ['Todas'])].concat(Object.keys(soc).sort().map(function (s) { return VEVA.dom.el('option', { value: s }, [s]); })));
+      selSociedad.value = f.sociedad;
+      selSociedad.addEventListener('change', function (e) { f.sociedad = e.target.value; redraw(); });
+      var inputBuscar = VEVA.dom.el('input', { type: 'text', 'data-focus-key': 'comprobantes-buscar', class: 'w-full border border-[#e6ebf1] rounded px-2 py-1.5 text-[12.5px] outline-none focus:border-[#635bff]', placeholder: 'Proveedor / folio...' }, []);
+      inputBuscar.value = f.busqueda;
+      inputBuscar.addEventListener('input', function (e) { f.busqueda = e.target.value; redraw(); });
+      var btnLimpiar = VEVA.dom.el('button', { class: 'px-3 py-1.5 border border-[#e6ebf1] rounded text-[12px] font-semibold hover:border-[#635bff]', onClick: function () { state.comprobantesFiltros = { fechaDesde: '', fechaHasta: '', sociedad: '', busqueda: '' }; redraw(); } }, ['Limpiar']);
+      children.push(VEVA.dom.el('div', { class: 'flex flex-wrap items-end gap-3 mt-2.5 bg-white border border-[#e6ebf1] rounded-xl p-3' }, [
+        campo('Desde', inputDesde), campo('Hasta', inputHasta), campo('Sociedad', selSociedad),
+        VEVA.dom.el('div', { class: 'flex-1 min-w-[180px]' }, [campo('Buscar', inputBuscar)]),
+        btnLimpiar
+      ]));
+    }
+    return VEVA.dom.el('div', { class: 'mb-3' }, children);
+  }
+
+  function fmtFechaCortaLocal(diaIso) { return diaIso ? diaIso.split('-').reverse().join('/') : ''; }
+
   function renderComprobantesTab() {
     if (state.comprobantesLoading || !state.comprobantesData) {
       return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 flex items-center justify-center gap-3' }, [VEVA.icon('loader', 20, 'animate-spin text-[#635bff]'), VEVA.dom.el('span', { class: 'text-[13px] text-[#697386]' }, ['Cargando comprobantes...'])]);
     }
-    var partidas = state.comprobantesData;
+    var partidas = _comprobantesFiltrados();
     var seleccionadas = partidas.filter(function (p) { return state.comprobantesSeleccion[p.id]; });
 
     var header = VEVA.dom.el('div', { class: 'flex items-center justify-between mb-3' }, [
@@ -1988,8 +2092,13 @@
       VEVA.dom.el('button', { class: 'flex items-center gap-1.5 px-3 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] font-bold hover:border-[#635bff]', onClick: cargarComprobantes }, [VEVA.icon('refresh-cw', 12), 'Actualizar'])
     ]);
 
-    if (!partidas.length) {
+    var filtroChip = renderComprobantesFiltroChip();
+
+    if (!state.comprobantesData.length) {
       return VEVA.dom.el('div', {}, [header, VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay partidas con pagos aplicados todavía.'])]);
+    }
+    if (!partidas.length) {
+      return VEVA.dom.el('div', {}, [header, filtroChip, VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['Ninguna partida coincide con el filtro.'])]);
     }
 
     var table = VEVA.dom.el('div', { class: 'bg-white border border-[#e6ebf1] rounded-xl overflow-hidden' }, [renderComprobantesHead()].concat(partidas.map(renderComprobantePartidaRow)));
@@ -2002,7 +2111,7 @@
       ]);
     }
 
-    return VEVA.dom.el('div', {}, [header, table, bulkBar].filter(Boolean));
+    return VEVA.dom.el('div', {}, [header, filtroChip, table, bulkBar].filter(Boolean));
   }
 
   function renderComprobantesHead() {

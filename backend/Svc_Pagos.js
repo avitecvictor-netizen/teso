@@ -2676,10 +2676,18 @@ function getComprobantesPago() {
           totalPartidas: partidasPorComprobante[v.comprobanteId] || 1
         };
       });
+      // Bug real encontrado por revisor (2026-08-12, mismo caso ya
+      // corregido en getHistoricoPagos): _pagoSheetToObjects convierte
+      // una celda Date con toISOString() -- UTC, no hora Mexico -- un
+      // pago aplicado despues de las 18:00 (UTC-6) caia en el dia UTC
+      // siguiente. El filtro de fecha de la pestaña Comprobantes compara
+      // este valor como string 'yyyy-MM-dd' en hora local, asi que sin
+      // este formateo explicito quedaba corrido un dia en ese horario.
+      var aplicadoFechaFmt = l.aplicadoFecha ? Utilities.formatDate(new Date(l.aplicadoFecha), Session.getScriptTimeZone(), 'yyyy-MM-dd') : '';
       return {
         id: l.id, folio: prop.folio || '', sociedad: prop.sociedad || '',
         proveedor: l.proveedor, desc: l.desc, monto: Number(l.monto), moneda: l.moneda,
-        aplicadoFecha: l.aplicadoFecha || '', comprobantes: vincs
+        aplicadoFecha: aplicadoFechaFmt, comprobantes: vincs
       };
     });
 
@@ -3042,7 +3050,15 @@ function _filasTablaCorreo(items, transicion) {
       + '<td style="padding:10px 4px 2px;font-size:11px;color:#697386;border-top:1px solid #f6f9fc;font-family:monospace;">' + _escapeHtmlCorreo(l.uuid) + '</td>'
       + '<td style="padding:10px 4px 2px;font-size:13px;font-weight:600;text-align:right;color:#0a2540;font-variant-numeric:tabular-nums;border-top:1px solid #f6f9fc;">' + _escapeHtmlCorreo(monedaMostrar) + ' ' + montoMostrar.toLocaleString('es-MX', { minimumFractionDigits: 2 }) + '</td>'
       + '</tr>';
-    var detalle = [l.desc, _textoFaseTransicion(l, transicion)].filter(Boolean).join(' · ');
+    // Pedido del usuario (2026-08-12): el correo de "Subido en banca"/
+    // "Rechazada" no mostraba el motivo (COMENTARIO, el mismo campo que
+    // ya se captura en la pestaña Carga a banca) ni el de "Aplicada en
+    // banca" mostraba como se resolvio (NOTA_APLICACION, capturado en la
+    // pestaña Pago aplicado) -- el destinatario del correo no tenia forma
+    // de saber por que se rechazo o que ajuste se aplico sin entrar a la
+    // plataforma.
+    var comentarioMostrar = (transicion.tipo === 'aplicado') ? l.notaAplicacion : l.comentario;
+    var detalle = [l.desc, comentarioMostrar, _textoFaseTransicion(l, transicion)].filter(Boolean).join(' · ');
     if (!detalle) return filaPrincipal;
     return filaPrincipal + '<tr><td colspan="5" style="padding:0 4px 10px;font-size:11px;color:#94a3b8;">' + _escapeHtmlCorreo(detalle) + '</td></tr>';
   }).join('');

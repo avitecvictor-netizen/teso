@@ -125,6 +125,41 @@
     ]);
   }
 
+  /** Exportar a CSV (2026-08-12, pedido del usuario) -- client-side, sin
+   * tocar backend: los datos ya estan en `state.filas` (el mismo rango
+   * filtrado que se ve en pantalla). Se eligio CSV sobre .xlsx real
+   * porque Excel lo abre sin problema y no requiere ninguna libreria
+   * nueva (`CONVENCIONES_TESO_1.md` exige version+justificacion para
+   * cualquier dependencia nueva). BOM UTF-8 al inicio para que Excel
+   * respete acentos/ñ en vez de mostrarlos rotos. Los montos/TC se
+   * exportan como numero crudo (no como texto "$1,234.56") para que
+   * Excel los pueda sumar directo, a diferencia del formato visual de la
+   * tabla en pantalla. */
+  function csvEscape(v) {
+    var s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function exportarCsv() {
+    var head = ['Fecha', 'Sociedad', 'Folio', 'Proveedor', 'Referencia', 'UUID', 'Cuenta', 'Banco', 'Moneda', 'TC del día', 'TC aplicado', 'Monto M.E.', 'Monto MXN', 'Solicitado por'];
+    var lineas = [head.map(csvEscape).join(',')];
+    state.filas.forEach(function (f) {
+      lineas.push([
+        fmtFechaCorta(f.fecha), f.sociedad, f.folio, f.proveedor, f.referencia, f.uuid, f.cuentaCorta, f.banco,
+        f.moneda, f.tcDelDia == null ? '' : f.tcDelDia, f.tcAplicado == null ? '' : f.tcAplicado,
+        f.montoMonedaExtranjera == null ? '' : f.montoMonedaExtranjera, f.montoMxn == null ? '' : f.montoMxn, f.solicitante
+      ].map(csvEscape).join(','));
+    });
+    var blob = new Blob(['﻿' + lineas.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'historico-pagos-' + (state.filtros.fechaDesde || 'todo') + '_a_' + (state.filtros.fechaHasta || 'hoy') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   function renderResumen() {
     var mapMe = {}, sumaMxn = 0, hayMxn = false;
     state.filas.forEach(function (f) {
@@ -136,7 +171,13 @@
     Object.keys(mapMe).sort().forEach(function (m) {
       chips.push(VEVA.dom.el('span', { class: 'font-mono text-[12px] font-bold rounded-full px-3 py-1 border border-[#635bff]/30 bg-[#635bff]/10 text-[#4c3fe0]' }, [m + ' ' + fmtMonto(mapMe[m])]));
     });
-    return VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-2 mb-3.5' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold uppercase tracking-wide text-[#8792a2] mr-1' }, ['Total del rango'])].concat(chips));
+    var btnExportar = VEVA.dom.el('button', {
+      class: 'ml-auto flex items-center gap-1.5 px-3 py-1.5 border border-[#e6ebf1] rounded-lg text-[12px] font-semibold text-[#425466] hover:border-[#635bff] hover:text-[#635bff] disabled:opacity-40 disabled:cursor-not-allowed',
+      disabled: state.filas.length ? null : 'disabled',
+      title: 'Descargar el rango filtrado en CSV (se abre en Excel)',
+      onClick: exportarCsv
+    }, [VEVA.icon('download', 13), 'Exportar CSV']);
+    return VEVA.dom.el('div', { class: 'flex flex-wrap items-center gap-2 mb-3.5' }, [VEVA.dom.el('span', { class: 'text-[10px] font-bold uppercase tracking-wide text-[#8792a2] mr-1' }, ['Total del rango'])].concat(chips).concat([btnExportar]));
   }
 
   function renderDiaSep(grupo) {
