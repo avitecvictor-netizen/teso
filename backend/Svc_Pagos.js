@@ -3121,13 +3121,23 @@ function _enviarCorreoNotificacionPagoSeccionado(ss, sociedad, secciones, emailA
   var lista = _pagoSheetToObjects(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS)
     .filter(function (d) { return d.sociedad === sociedad && _esActivo(d.activo); });
   var destinatarios = lista.map(function (d) { return d.email; }).filter(function (e) { return e; });
-  if (!destinatarios.length) return;
 
   var listaCc = _pagoSheetToObjects(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS)
     .filter(function (d) { return d.sociedad === sociedad && _esActivo(d.activo); })
     .map(function (d) { return d.email; });
   var copiasCrudas = listaCc.concat(ccExtraEmails || []).filter(function (e) { return e; });
   var copias = copiasCrudas.filter(function (e, i) { return copiasCrudas.indexOf(e) === i; });
+
+  // Bug real reportado por el usuario (2026-08-13): antes, sin
+  // destinatarios TO activos, se abortaba el envio COMPLETO -- incluso
+  // si SI habia gente activa en copia (CONFIG_CC_PAGOS/CC extra de la
+  // propuesta), que entonces tampoco recibia nada. GmailApp.sendEmail
+  // exige un "to" no vacio, asi que no se puede mandar "solo CC" tal
+  // cual -- si no hay TO pero si hay copia, la copia se promueve a
+  // destinatario principal (se limpia de `copias` para no duplicarla)
+  // en vez de no mandar nada.
+  if (!destinatarios.length && copias.length) { destinatarios = copias; copias = []; }
+  if (!destinatarios.length) return;
 
   var urlApp = '';
   try { urlApp = ScriptApp.getService().getUrl(); } catch (eUrl) { /* correo sale sin boton si getUrl() falla */ }
@@ -3192,13 +3202,23 @@ function _enviarCorreoNotificacionPagoUnica(ss, sociedad, transicion, items, ema
   var lista = _pagoSheetToObjects(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS)
     .filter(function (d) { return d.sociedad === sociedad && _esActivo(d.activo); });
   var destinatarios = lista.map(function (d) { return d.email; }).filter(function (e) { return e; });
-  if (!destinatarios.length) return;
 
   var listaCc = _pagoSheetToObjects(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS)
     .filter(function (d) { return d.sociedad === sociedad && _esActivo(d.activo); })
     .map(function (d) { return d.email; });
   var copiasCrudas = listaCc.concat(ccExtraEmails || []).filter(function (e) { return e; });
   var copias = copiasCrudas.filter(function (e, i) { return copiasCrudas.indexOf(e) === i; });
+
+  // Bug real reportado por el usuario (2026-08-13): antes, sin
+  // destinatarios TO activos, se abortaba el envio COMPLETO -- incluso
+  // si SI habia gente activa en copia (CONFIG_CC_PAGOS/CC extra de la
+  // propuesta), que entonces tampoco recibia nada. GmailApp.sendEmail
+  // exige un "to" no vacio, asi que no se puede mandar "solo CC" tal
+  // cual -- si no hay TO pero si hay copia, la copia se promueve a
+  // destinatario principal (se limpia de `copias` para no duplicarla)
+  // en vez de no mandar nada.
+  if (!destinatarios.length && copias.length) { destinatarios = copias; copias = []; }
+  if (!destinatarios.length) return;
 
   var urlApp = '';
   try { urlApp = ScriptApp.getService().getUrl(); } catch (eUrl) { /* correo sale sin boton si getUrl() falla */ }
@@ -3264,12 +3284,42 @@ function _enviarCorreoNotificacionPagoUnica(ss, sociedad, transicion, items, ema
 
 /** Todas las filas de todas las sociedades -- el frontend agrupa/filtra
  * por sociedad seleccionada. */
+/** Filas con EMAIL pero SOCIEDAD vacia -- invisibles para el resto del
+ * sistema (_pagoSheetToObjects las descarta por completo, ver su propio
+ * comentario) aunque la fila siga fisicamente en la hoja. Causa real
+ * confirmada (auditoria 2026-08-13): el unico camino de escritura de la
+ * app, _guardarListaPorSociedad, nunca deja SOCIEDAD vacia -- solo puede
+ * pasar por edicion manual directa de la hoja. Se reportan aqui para que
+ * el usuario las encuentre sin tener que abrir la hoja cruda a buscarlas. */
+function _filasHuerfanasConfig(sh, headers) {
+  if (sh.getLastRow() < 2) return [];
+  var socCol = headers.indexOf('SOCIEDAD');
+  var emailCol = headers.indexOf('EMAIL');
+  var values = sh.getRange(2, 1, sh.getLastRow() - 1, headers.length).getValues();
+  var huerfanas = [];
+  values.forEach(function (row, i) {
+    if (String(row[socCol] || '').trim() === '' && String(row[emailCol] || '').trim() !== '') {
+      huerfanas.push({ fila: i + 2, email: String(row[emailCol]).trim() });
+    }
+  });
+  return huerfanas;
+}
+
 function getListaNotificacionesPago() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
     if (!_tieneAccesoAVista(ss, 'notificaciones-pagos')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
-    var lista = _pagoSheetToObjects(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS);
-    return { status: 'success', data: lista, message: '' };
+    var sh = _ensureConfigNotificacionesPagoSheet(ss);
+    // Bug real (auditoria 2026-08-13): el toggle del frontend pintaba
+    // "activo" con cualquier texto no vacio en la celda (comparacion
+    // truthy cruda), mientras el envio de correo SI usaba _esActivo
+    // (solo reconoce TRUE/valores validos) -- una celda con texto libre
+    // ("No", etc.) se veia activa en pantalla pero quedaba excluida del
+    // envio real. Se normaliza aqui con el mismo criterio, una sola vez,
+    // para que ambos lados coincidan siempre.
+    var lista = _pagoSheetToObjects(sh, CONFIG_NOTIFICACIONES_PAGOS_HEADERS)
+      .map(function (r) { return Object.assign({}, r, { activo: _esActivo(r.activo) }); });
+    return { status: 'success', data: lista, huerfanas: _filasHuerfanasConfig(sh, CONFIG_NOTIFICACIONES_PAGOS_HEADERS), message: '' };
   } catch (e) {
     return { status: 'error', data: [], message: e.toString() };
   }
@@ -3292,6 +3342,22 @@ function _guardarListaPorSociedad(sh, headers, sociedad, listaNueva) {
   var nuevasDeEstaSociedad = (listaNueva || []).map(function (item) {
     return { sociedad: sociedad, email: String(item.email || '').trim(), nombre: String(item.nombre || '').trim(), activo: item.activo !== false, fechaAlta: item.fechaAlta || ahora };
   }).filter(function (r) { return r.email; });
+
+  // Bug real (auditoria 2026-08-13): nada deduplicaba por email dentro de
+  // la misma sociedad -- una condicion de carrera en el frontend (2 clics
+  // rapidos sobre distintos toggles antes de que el primer guardado
+  // respondiera) podia dejar 2 filas para la misma persona, causando un
+  // correo duplicado. Se deduplica aqui, en el unico lugar que escribe la
+  // hoja, sin importar por donde haya entrado el duplicado -- se queda
+  // con la ULTIMA aparicion (el estado mas reciente que mando el
+  // cliente), comparando el email sin distinguir mayusculas/minusculas.
+  var vistos = {};
+  nuevasDeEstaSociedad = nuevasDeEstaSociedad.reverse().filter(function (r) {
+    var clave = r.email.toLowerCase();
+    if (vistos[clave]) return false;
+    vistos[clave] = true;
+    return true;
+  }).reverse();
 
   var todas = deOtrasSociedades.concat(nuevasDeEstaSociedad);
   var filas = todas.map(function (r) {
@@ -3355,8 +3421,13 @@ function getListaCcPagos() {
   try {
     var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
     if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', data: [], message: 'No tienes acceso a este módulo. Solo un administrador de Tesorería puede verlo.' };
-    var lista = _pagoSheetToObjects(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS);
-    return { status: 'success', data: lista, message: '' };
+    var sh = _ensureConfigCcPagosSheet(ss);
+    // Mismo fix que getListaNotificacionesPago (ver comentario ahi): el
+    // toggle debe reflejar el mismo criterio _esActivo que ya usa el
+    // envio real de correo, no una comparacion truthy cruda.
+    var lista = _pagoSheetToObjects(sh, CONFIG_CC_PAGOS_HEADERS)
+      .map(function (r) { return Object.assign({}, r, { activo: _esActivo(r.activo) }); });
+    return { status: 'success', data: lista, huerfanas: _filasHuerfanasConfig(sh, CONFIG_CC_PAGOS_HEADERS), message: '' };
   } catch (e) {
     return { status: 'error', data: [], message: e.toString() };
   }

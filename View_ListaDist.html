@@ -48,6 +48,10 @@
     // "desactivo" a alguien cuando en realidad solo se desactivo en la
     // sociedad que se tenia seleccionada, mientras seguia activo en otra.
     ccModo: 'sociedad', ccPersonaQuery: '',
+    // Filas con EMAIL pero SOCIEDAD vacia -- invisibles en el resto de
+    // esta pestana (auditoria 2026-08-13, ver _filasHuerfanasConfig en
+    // Svc_Pagos.js).
+    ccHuerfanas: [],
 
     // ---- Tab "Remitente" (2026-08-10, nueva) ----
     // Correo real de tesoreria corporativa que usan Posicion Bancaria y
@@ -78,6 +82,12 @@
   }
 
   function agregar() {
+    // Bug real (auditoria 2026-08-13, 3ra ronda): guarda de reentrada
+    // explicita -- mismo criterio aplicado a ccAgregar/agregar (CC de
+    // Pagos/Notificaciones de Pagos) para no reentrar mientras un
+    // guardado anterior sigue en vuelo (el input dispara esta funcion
+    // directo por Enter, sin pasar por el boton "Agregar").
+    if (state.saving) return;
     if (state.newEmail.indexOf('@') < 0) return;
     var nueva = state.lista.concat([{ email: state.newEmail.trim(), nombre: state.newNombre.trim(), activo: true }]);
     state.lista = nueva; state.newEmail = ''; state.newNombre = '';
@@ -107,14 +117,22 @@
   }
 
   function renderFilaDestinatario(r, i) {
-    var toggle = VEVA.dom.el('button', { class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (r.activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]'), onClick: function () { toggleActivo(i); } }, [
+    // Bug real (auditoria 2026-08-13, mismo patron aplicado a Notificaciones
+    // de Pagos/CC de Pagos): se bloquea toggle/eliminar mientras
+    // state.saving este activo, para no pisar/duplicar filas con 2 clics
+    // rapidos (guardar() reemplaza toda la lista con el estado en ese momento).
+    var editable = !state.saving;
+    var toggle = VEVA.dom.el('button', {
+      class: 'w-10 h-5 rounded-full transition-all relative flex-shrink-0 ' + (r.activo ? 'bg-[#635bff]' : 'bg-[#e6ebf1]') + (editable ? '' : ' opacity-50 cursor-not-allowed'),
+      onClick: editable ? function () { toggleActivo(i); } : null
+    }, [
       VEVA.dom.el('span', { class: 'absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ' + (r.activo ? 'left-5' : 'left-0.5') }, [])
     ]);
     return VEVA.dom.el('tr', { class: r.activo ? '' : 'opacity-50' }, [
       VEVA.dom.el('td', { class: 'px-5 py-3 font-mono text-[12px]' }, [r.email]),
       VEVA.dom.el('td', { class: 'px-5 py-3 text-[#697386]' }, [r.nombre || '—']),
       VEVA.dom.el('td', { class: 'px-5 py-3 text-center' }, [toggle]),
-      VEVA.dom.el('td', { class: 'px-3 py-3' }, [VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { eliminar(i); } }, [VEVA.icon('x', 14)])])
+      VEVA.dom.el('td', { class: 'px-3 py-3' }, [editable ? VEVA.dom.el('button', { class: 'p-1 hover:bg-red-50 rounded text-[#697386] hover:text-red-500 transition-colors', onClick: function () { eliminar(i); } }, [VEVA.icon('x', 14)]) : null])
     ]);
   }
 
@@ -137,18 +155,18 @@
       body = VEVA.dom.el('table', { class: 'w-full text-[13px]' }, [thead, VEVA.dom.el('tbody', { class: 'divide-y divide-[#f6f9fc]' }, rows)]);
     }
 
-    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]', disabled: state.saving ? 'disabled' : null }, []);
     inEmail.value = state.newEmail;
     inEmail.addEventListener('input', function (e) { state.newEmail = e.target.value; });
     inEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') agregar(); });
-    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]', disabled: state.saving ? 'disabled' : null }, []);
     inNombre.value = state.newNombre;
     inNombre.addEventListener('input', function (e) { state.newNombre = e.target.value; });
 
     var agregarForm = VEVA.dom.el('div', { class: 'px-5 py-4 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 flex flex-wrap gap-3 items-end' }, [
       VEVA.dom.el('div', { class: 'flex-1 min-w-[200px] space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']), inEmail]),
       VEVA.dom.el('div', { class: 'w-40 space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']), inNombre]),
-      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: agregar, disabled: state.newEmail.indexOf('@') < 0 ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
+      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: agregar, disabled: (state.newEmail.indexOf('@') < 0 || state.saving) ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
     ]);
 
     return VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] shadow-sm overflow-hidden' }, [header, body, agregarForm]);
@@ -216,6 +234,7 @@
         state.ccUsuario = (resUsuario && resUsuario.status === 'success') ? resUsuario.data : null;
         state.ccEsAdmin = (resConfig && resConfig.status === 'success') ? !!resConfig.data.esAdmin : false;
         state.ccListaCompleta = resLista.data;
+        state.ccHuerfanas = resLista.huerfanas || [];
         var soc = {};
         ((resCat && resCat.status === 'success') ? resCat.data : []).forEach(function (c) { if (c.nombreCorto) soc[c.nombreCorto] = true; });
         state.ccSociedades = Object.keys(soc).sort();
@@ -261,6 +280,11 @@
   }
 
   function ccAgregar() {
+    // Bug real (auditoria 2026-08-13, 3ra ronda): guarda de reentrada
+    // explicita -- no depender solo del atributo disabled del boton, ya
+    // que el input de email dispara esta misma funcion directo por Enter
+    // (keydown), sin pasar por el boton.
+    if (state.ccSaving) return;
     if (state.ccNewEmail.indexOf('@') < 0) return;
     var sociedadesDestino = Object.keys(state.ccNuevoSociedades).filter(function (s) { return state.ccNuevoSociedades[s]; });
     if (!sociedadesDestino.length) {
@@ -337,7 +361,11 @@
   }
 
   function ccRenderFilaDestinatario(r, i) {
-    var editable = ccPuedeEditar();
+    // Bug real (auditoria 2026-08-13): igual que en Notificaciones de
+    // Pagos, se bloquean toggle/eliminar/inputs mientras un guardado
+    // anterior sigue en vuelo, para no pisar/duplicar filas con 2 clics
+    // rapidos (ccGuardarParaSociedad reemplaza TODA la sociedad).
+    var editable = ccPuedeEditar() && !state.ccSaving;
     var claveFila = 'cc-row-' + r.email;
     var celdaEmail, celdaNombre;
     if (editable) {
@@ -379,7 +407,9 @@
   function ccRenderChecklistSociedades() {
     if (state.ccSociedades.length <= 1) return null;
     var checks = state.ccSociedades.map(function (soc) {
-      var cb = VEVA.dom.el('input', { type: 'checkbox', class: 'accent-[#635bff]' }, []);
+      // Bug real (auditoria 2026-08-13): bloqueado mientras state.ccSaving,
+      // mismo criterio que el resto de esta pantalla.
+      var cb = VEVA.dom.el('input', { type: 'checkbox', class: 'accent-[#635bff]', disabled: state.ccSaving ? 'disabled' : null }, []);
       cb.checked = !!state.ccNuevoSociedades[soc];
       cb.addEventListener('change', function (e) { state.ccNuevoSociedades[soc] = e.target.checked; redraw(); });
       return VEVA.dom.el('label', { class: 'flex items-center gap-1.5 text-[11px] text-[#0a2540] cursor-pointer' }, [cb, soc]);
@@ -394,18 +424,18 @@
     if (!ccPuedeEditar()) {
       return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo un administrador de Tesorería puede editar esta lista.']);
     }
-    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'cc-email', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'cc-email', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]', disabled: state.ccSaving ? 'disabled' : null }, []);
     inEmail.value = state.ccNewEmail;
     inEmail.addEventListener('input', function (e) { state.ccNewEmail = e.target.value; redraw(); });
     inEmail.addEventListener('keydown', function (e) { if (e.key === 'Enter') ccAgregar(); });
-    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', 'data-focus-key': 'cc-nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
+    var inNombre = VEVA.dom.el('input', { type: 'text', placeholder: 'Nombre', 'data-focus-key': 'cc-nombre', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]', disabled: state.ccSaving ? 'disabled' : null }, []);
     inNombre.value = state.ccNewNombre;
     inNombre.addEventListener('input', function (e) { state.ccNewNombre = e.target.value; });
 
     var camposForm = VEVA.dom.el('div', { class: 'flex flex-wrap gap-3 items-end' }, [
       VEVA.dom.el('div', { class: 'flex-1 min-w-[200px] space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Email']), inEmail]),
       VEVA.dom.el('div', { class: 'w-40 space-y-1' }, [VEVA.dom.el('label', { class: 'text-[10px] font-bold text-[#697386] uppercase tracking-wider' }, ['Nombre']), inNombre]),
-      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: ccAgregar, disabled: state.ccNewEmail.indexOf('@') < 0 ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
+      VEVA.dom.el('button', { class: 'px-4 py-2 bg-[#635bff] text-white rounded-lg text-[12px] font-bold hover:bg-[#5851e5] transition-all disabled:opacity-40 flex items-center gap-1.5', onClick: ccAgregar, disabled: (state.ccNewEmail.indexOf('@') < 0 || state.ccSaving) ? 'disabled' : null }, [VEVA.icon('plus', 14), 'Agregar'])
     ]);
 
     var formChildren = [camposForm, ccRenderChecklistSociedades()].filter(Boolean);
@@ -475,7 +505,11 @@
   function ccRenderFilaPersonaSociedad(email, sociedad) {
     var fila = ccListaDeSociedad(sociedad).filter(function (r) { return r.email === email; })[0];
     var activo = !!(fila && fila.activo);
-    var editable = ccPuedeEditar();
+    // Bug real (auditoria 2026-08-13): igual que en Notificaciones de
+    // Pagos, se bloquean toggle/eliminar/inputs mientras un guardado
+    // anterior sigue en vuelo, para no pisar/duplicar filas con 2 clics
+    // rapidos (ccGuardarParaSociedad reemplaza TODA la sociedad).
+    var editable = ccPuedeEditar() && !state.ccSaving;
     var toggle = ccRenderToggle(activo, editable, function () { ccTogglePersonaSociedad(email, sociedad); });
     return VEVA.dom.el('tr', { class: activo ? '' : 'opacity-50' }, [
       VEVA.dom.el('td', { class: 'px-5 py-3 font-semibold text-[13px]' }, [sociedad]),
@@ -559,6 +593,15 @@
     if (state.ccError) {
       children.push(VEVA.dom.el('div', { class: 'bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3' }, [VEVA.icon('alert-circle', 16, 'text-red-500 flex-shrink-0'), VEVA.dom.el('p', { class: 'text-[13px] text-red-700' }, [state.ccError])]));
     }
+    if (state.ccHuerfanas.length) {
+      children.push(VEVA.dom.el('div', { class: 'bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-start gap-3' }, [
+        VEVA.icon('alert-circle', 16, 'text-amber-600 flex-shrink-0 mt-0.5'),
+        VEVA.dom.el('div', {}, [
+          VEVA.dom.el('p', { class: 'text-[13px] font-bold text-amber-800' }, [state.ccHuerfanas.length + ' fila(s) con correo sin sociedad asignada']),
+          VEVA.dom.el('p', { class: 'text-[12px] text-amber-700 mt-0.5' }, ['No aparecen abajo porque les falta la Sociedad — corrígelo directo en la hoja CONFIG_CC_PAGOS: ' + state.ccHuerfanas.map(function (h) { return h.email + ' (fila ' + h.fila + ')'; }).join(', ') + '.'])
+        ])
+      ]));
+    }
     if (!state.ccLoading && !state.ccSociedades.length) {
       children.push(VEVA.dom.el('div', { class: 'bg-white rounded-xl border border-[#e6ebf1] p-10 text-center text-[13px] text-[#697386]' }, ['No hay sociedades en el catálogo de cuentas todavía.']));
       return VEVA.dom.el('div', { class: 'space-y-6' }, children);
@@ -612,6 +655,11 @@
   }
 
   function remAgregarAdmin() {
+    // Bug real (auditoria 2026-08-13, 4ta ronda): guarda de reentrada
+    // explicita, mismo criterio ya aplicado a agregar()/ccAgregar() -- el
+    // input dispara esta funcion directo por Enter (keydown), sin pasar
+    // por el boton "Agregar admin" (que solo tiene disabled).
+    if (state.remSaving) return;
     var email = state.remNuevoAdminEmail.trim();
     if (email.indexOf('@') < 0) return;
     if (state.remAdmins.indexOf(email.toLowerCase()) >= 0) { state.remNuevoAdminEmail = ''; redraw(); return; }
@@ -643,8 +691,14 @@
   }
 
   function remRenderEmail() {
+    // Bug real (auditoria 2026-08-13, mismo patron que el resto de esta
+    // pantalla): se bloquea la edicion mientras state.remSaving este
+    // activo, para no reentrar remGuardar() con un guardado anterior
+    // todavia en vuelo (guardarConfigTesoreria reemplaza el correo/lista
+    // de admins completos con lo que reciba).
+    var editable = state.remEsAdmin && !state.remSaving;
     var inputEmail;
-    if (state.remEsAdmin) {
+    if (editable) {
       inputEmail = VEVA.dom.el('input', { type: 'email', 'data-focus-key': 'rem-email', class: 'w-full text-[13px] border border-[#e6ebf1] rounded-lg px-3 py-2.5 bg-white outline-none focus:border-[#635bff]' }, []);
       inputEmail.value = state.remEmail;
       inputEmail.addEventListener('input', function (e) { state.remEmail = e.target.value; });
@@ -659,10 +713,13 @@
   }
 
   function remRenderAdmins() {
+    // Mismo criterio que remRenderEmail (ver comentario ahi): bloqueado
+    // mientras state.remSaving este activo.
+    var editable = state.remEsAdmin && !state.remSaving;
     var chips = state.remAdmins.map(function (email) {
       return VEVA.dom.el('span', { class: 'inline-flex items-center gap-1.5 bg-[#f6f9fc] border border-[#e6ebf1] rounded-full pl-3 pr-1.5 py-1 text-[12px] font-mono' }, [
         email,
-        state.remEsAdmin ? VEVA.dom.el('button', { class: 'p-0.5 hover:bg-red-50 rounded-full text-[#697386] hover:text-red-500', onClick: function () { remQuitarAdmin(email); } }, [VEVA.icon('x', 11)]) : null
+        editable ? VEVA.dom.el('button', { class: 'p-0.5 hover:bg-red-50 rounded-full text-[#697386] hover:text-red-500', onClick: function () { remQuitarAdmin(email); } }, [VEVA.icon('x', 11)]) : null
       ].filter(Boolean));
     });
     var children = [
@@ -670,13 +727,13 @@
       VEVA.dom.el('div', { class: 'flex flex-wrap gap-2' }, chips)
     ];
     if (state.remEsAdmin) {
-      var inNuevo = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'rem-nuevo-admin', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff] w-64' }, []);
+      var inNuevo = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'rem-nuevo-admin', class: 'text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff] w-64', disabled: state.remSaving ? 'disabled' : null }, []);
       inNuevo.value = state.remNuevoAdminEmail;
       inNuevo.addEventListener('input', function (e) { state.remNuevoAdminEmail = e.target.value; });
       inNuevo.addEventListener('keydown', function (e) { if (e.key === 'Enter') remAgregarAdmin(); });
       children.push(VEVA.dom.el('div', { class: 'flex items-center gap-2 pt-1' }, [
         inNuevo,
-        VEVA.dom.el('button', { class: 'px-3 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[12px] font-semibold text-[#635bff] hover:border-[#635bff] transition-all', onClick: remAgregarAdmin }, ['Agregar admin'])
+        VEVA.dom.el('button', { class: 'px-3 py-2 bg-white border border-[#e6ebf1] rounded-lg text-[12px] font-semibold text-[#635bff] hover:border-[#635bff] transition-all disabled:opacity-40', onClick: remAgregarAdmin, disabled: state.remSaving ? 'disabled' : null }, ['Agregar admin'])
       ]));
     }
     return VEVA.dom.el('div', { class: 'space-y-2' }, children);
