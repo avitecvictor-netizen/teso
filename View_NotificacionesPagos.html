@@ -90,8 +90,14 @@
     return VEVA.gas('guardarListaNotificacionesPago', { sociedad: sociedad, lista: nuevaListaSociedad })
       .then(function (res) {
         if (res.status !== 'success') return { ok: false, message: res.message };
+        // Bug reportado (2026-08-12, mismo caso que CC de Pagos): se usa
+        // la lista que el backend confirma haber guardado, no el payload
+        // que este cliente mando -- evita que la pantalla quede
+        // desincronizada de la hoja real si un guardado se pierde o llega
+        // desordenado.
+        var listaConfirmada = (res.data && res.data.lista) || nuevaListaSociedad;
         var deOtras = state.listaCompleta.filter(function (r) { return r.sociedad !== sociedad; });
-        state.listaCompleta = deOtras.concat(nuevaListaSociedad.map(function (r) { return Object.assign({ sociedad: sociedad }, r); }));
+        state.listaCompleta = deOtras.concat(listaConfirmada.map(function (r) { return Object.assign({ sociedad: sociedad }, r); }));
         return { ok: true };
       })
       .catch(function (e) { return { ok: false, message: String(e.message || e) }; });

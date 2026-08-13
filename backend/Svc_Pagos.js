@@ -74,6 +74,10 @@ var SHEET_CONFIG_TESORERIA = 'CONFIG_TESORERIA';
 // carpeta nueva por codigo, ya existe.
 var COMPROBANTES_DRIVE_FOLDER_ID = '10E6ekjx1BWCUTAEUjv6HPIttmHzA6kLn';
 var SHEET_CONFIG_NOTIFICACIONES_PAGOS = 'CONFIG_NOTIFICACIONES_PAGOS';
+// Cola de notificaciones de pagos (Bug D, 2026-08-12): ver comentario
+// completo junto a _encolarNotificacionPagos.
+var SHEET_COLA_NOTIFICACIONES_PAGO = 'COLA_NOTIFICACIONES_PAGO';
+var COLA_NOTIFICACIONES_PAGO_HEADERS = ['ID', 'GRUPOS_JSON', 'ACTOR_EMAIL', 'CREADA_FECHA', 'PROCESADA', 'PROCESADA_FECHA', 'ERROR'];
 
 // SOLICITANTE se movio de aqui a PARTIDAS_PAGO (2026-07-26, carga de
 // propuesta): en el archivo real, el solicitante varia por linea dentro
@@ -2821,12 +2825,105 @@ function _notificarTransicionPagos(ss, idsExitosos, transicion, emailActor) {
  * orden que deben aparecer las secciones (positivas primero). Los
  * llamadores de un solo grupo siguen usando _notificarTransicionPagos
  * (arriba), que ahora delega aqui -- comportamiento identico a antes de
- * este bloque para todos ellos. */
+ * este bloque para todos ellos.
+ *
+ * Bug D (2026-08-12): esta funcion YA NO envia el correo de forma
+ * sincrona -- antes GmailApp.sendEmail corria dentro del mismo request
+ * que la UI estaba esperando (updatePartidaPago/bulkUpdatePartidasPago),
+ * sintiendose lenta/colgada, y el correo podia llegar al destinatario
+ * ANTES de que quien ejecuto la accion viera el resultado en pantalla.
+ * Apps Script no tiene un verdadero "fire-and-forget" dentro de la misma
+ * ejecucion -- la unica forma real de desacoplar es encolar el trabajo
+ * (hoja COLA_NOTIFICACIONES_PAGO) y procesarlo en una ejecucion aparte
+ * via un trigger de tiempo recurrente (procesarColaNotificacionesPago,
+ * cada 1 minuto, instalado una sola vez para todo el proyecto -- nunca
+ * un trigger nuevo por accion, para no agotar la cuota de triggers). El
+ * envio real (antes el cuerpo de esta misma funcion) vive ahora en
+ * _procesarGrupoNotificacionPagos. Trade-off aceptado: el correo puede
+ * tardar hasta ~1 minuto en salir, a cambio de que la pantalla responda
+ * de inmediato. */
 function _notificarTransicionPagosMultiple(ss, grupos, emailActor) {
   try {
     grupos = (grupos || []).filter(function (g) { return g.transicion && g.idsExitosos && g.idsExitosos.length; });
     if (!grupos.length) return;
+    var sh = _ensureColaNotificacionesPagoSheet(ss);
+    sh.appendRow([Utilities.getUuid(), JSON.stringify(grupos), emailActor || '', new Date(), false, '', '']);
+    _ensureColaTriggerInstalado();
+  } catch (e) {
+    Logger.log('No se pudo encolar la notificacion de pagos (no afecta la mutacion ya guardada): ' + e.toString());
+  }
+}
 
+function _ensureColaNotificacionesPagoSheet(ss) {
+  var sh = ss.getSheetByName(SHEET_COLA_NOTIFICACIONES_PAGO);
+  if (sh) return sh;
+  sh = ss.insertSheet(SHEET_COLA_NOTIFICACIONES_PAGO);
+  sh.getRange(1, 1, 1, COLA_NOTIFICACIONES_PAGO_HEADERS.length).setValues([COLA_NOTIFICACIONES_PAGO_HEADERS]);
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+/** Idempotente -- se llama en cada encolado (listar triggers es barato).
+ * Garantiza que exista EXACTAMENTE un trigger recurrente para todo el
+ * proyecto, nunca uno nuevo por accion. */
+function _ensureColaTriggerInstalado() {
+  var yaExiste = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'procesarColaNotificacionesPago';
+  });
+  if (yaExiste) return;
+  ScriptApp.newTrigger('procesarColaNotificacionesPago').timeBased().everyMinutes(1).create();
+}
+
+/** Handler del trigger de tiempo (cada 1 minuto). Procesa todas las filas
+ * pendientes de la cola, cada una en su propio try/catch -- que falle
+ * una fila (ej. JSON corrupto, sociedad ya no existe) no debe impedir
+ * que las demas se procesen. LockService.tryLock (no waitLock) evita que
+ * 2 disparos del trigger se pisen si uno tarda mas de 1 minuto: si el
+ * lock esta tomado, este disparo simplemente no hace nada y el proximo
+ * (1 minuto despues) retoma las filas que sigan pendientes. Filas
+ * procesadas se marcan PROCESADA=true en vez de borrarse, con o sin
+ * error, para conservar rastro de diagnostico. */
+function procesarColaNotificacionesPago() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    var sh = _ensureColaNotificacionesPagoSheet(ss);
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return;
+    var procesadaCol = COLA_NOTIFICACIONES_PAGO_HEADERS.indexOf('PROCESADA') + 1;
+    var grupCol = COLA_NOTIFICACIONES_PAGO_HEADERS.indexOf('GRUPOS_JSON') + 1;
+    var actorCol = COLA_NOTIFICACIONES_PAGO_HEADERS.indexOf('ACTOR_EMAIL') + 1;
+    var fechaProcCol = COLA_NOTIFICACIONES_PAGO_HEADERS.indexOf('PROCESADA_FECHA') + 1;
+    var errorCol = COLA_NOTIFICACIONES_PAGO_HEADERS.indexOf('ERROR') + 1;
+    var filas = sh.getRange(2, 1, lastRow - 1, COLA_NOTIFICACIONES_PAGO_HEADERS.length).getValues();
+    filas.forEach(function (fila, idx) {
+      if (fila[procesadaCol - 1] === true) return;
+      var filaReal = idx + 2;
+      try {
+        var grupos = JSON.parse(fila[grupCol - 1]);
+        _procesarGrupoNotificacionPagos(ss, grupos, fila[actorCol - 1]);
+        sh.getRange(filaReal, procesadaCol).setValue(true);
+        sh.getRange(filaReal, fechaProcCol).setValue(new Date());
+      } catch (eFila) {
+        Logger.log('Fila de cola de notificaciones de pagos fallo (la mutacion de negocio ya habia quedado guardada de todas formas): ' + eFila.toString());
+        sh.getRange(filaReal, procesadaCol).setValue(true);
+        sh.getRange(filaReal, fechaProcCol).setValue(new Date());
+        sh.getRange(filaReal, errorCol).setValue(eFila.toString());
+      }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Envio real de los correos -- antes era el cuerpo de
+ * _notificarTransicionPagosMultiple; ahora solo lo llama
+ * procesarColaNotificacionesPago (el trigger), nunca directo desde una
+ * mutacion de PARTIDAS_PAGO. Mismo comportamiento exacto de antes del
+ * Bug D, solo que ahora corre en una ejecucion aparte. */
+function _procesarGrupoNotificacionPagos(ss, grupos, emailActor) {
+  try {
     var propRows = _pagoSheetToObjects(_ensurePropuestasPagoSheet(ss), PROPUESTAS_PAGO_HEADERS);
     var propById = {};
     propRows.forEach(function (p) { propById[p.id] = p; });
@@ -3191,8 +3288,14 @@ function _guardarListaPorSociedad(sh, headers, sociedad, listaNueva) {
   var lastRow = sh.getLastRow();
   if (lastRow > 1) sh.getRange(2, 1, lastRow - 1, headers.length).clearContent();
   if (filas.length) sh.getRange(2, 1, filas.length, headers.length).setValues(filas);
+  // Bug reportado (2026-08-12): sin flush(), una lectura inmediatamente
+  // posterior (recarga de pantalla, otra pestaña) podia no ver todavia
+  // este escrito -- Apps Script no garantiza que setValues() sea visible
+  // fuera de esta misma ejecucion hasta que el script termina o se llama
+  // flush() explicitamente.
+  SpreadsheetApp.flush();
 
-  return nuevasDeEstaSociedad.length;
+  return nuevasDeEstaSociedad;
 }
 
 function guardarListaNotificacionesPago(payload) {
@@ -3207,8 +3310,15 @@ function guardarListaNotificacionesPago(payload) {
     if (!_tieneAccesoAVista(ss, 'notificaciones-pagos')) return { status: 'error', message: 'No tienes permiso para editar la lista de notificaciones.' };
     if (!payload.sociedad) return { status: 'error', message: 'Falta la sociedad.' };
 
-    var guardados = _guardarListaPorSociedad(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS, payload.sociedad, payload.lista);
-    return { status: 'success', data: { guardados: guardados }, message: guardados + ' destinatario(s) guardados para ' + payload.sociedad + '.' };
+    var listaGuardada = _guardarListaPorSociedad(_ensureConfigNotificacionesPagoSheet(ss), CONFIG_NOTIFICACIONES_PAGOS_HEADERS, payload.sociedad, payload.lista);
+    // Bug reportado (2026-08-12): el frontend actualizaba su copia local
+    // con lo que EL MISMO habia mandado a guardar, nunca con lo que el
+    // servidor realmente confirmo -- si una llamada se perdia o llegaba
+    // desordenada (2 guardados casi simultaneos de la misma sociedad), la
+    // pantalla quedaba desincronizada de la hoja real sin ningun aviso.
+    // Ahora se devuelve la lista real recien guardada para que el
+    // frontend la use como fuente de verdad en vez de su propio payload.
+    return { status: 'success', data: { guardados: listaGuardada.length, lista: listaGuardada }, message: listaGuardada.length + ' destinatario(s) guardados para ' + payload.sociedad + '.' };
   } catch (e) {
     return { status: 'error', message: e.toString() };
   } finally {
@@ -3248,8 +3358,10 @@ function guardarListaCcPagos(payload) {
     if (!_tieneAccesoAVista(ss, 'lista-dist')) return { status: 'error', message: 'No tienes permiso para editar la lista de CC de pagos.' };
     if (!payload.sociedad) return { status: 'error', message: 'Falta la sociedad.' };
 
-    var guardados = _guardarListaPorSociedad(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS, payload.sociedad, payload.lista);
-    return { status: 'success', data: { guardados: guardados }, message: guardados + ' contacto(s) en copia guardados para ' + payload.sociedad + '.' };
+    var listaGuardada = _guardarListaPorSociedad(_ensureConfigCcPagosSheet(ss), CONFIG_CC_PAGOS_HEADERS, payload.sociedad, payload.lista);
+    // Mismo fix que guardarListaNotificacionesPago (ver comentario ahi):
+    // se devuelve la lista real confirmada por el servidor, no un conteo.
+    return { status: 'success', data: { guardados: listaGuardada.length, lista: listaGuardada }, message: listaGuardada.length + ' contacto(s) en copia guardados para ' + payload.sociedad + '.' };
   } catch (e) {
     return { status: 'error', message: e.toString() };
   } finally {

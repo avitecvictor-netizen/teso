@@ -238,8 +238,16 @@
     return VEVA.gas('guardarListaCcPagos', { sociedad: sociedad, lista: nuevaListaSociedad })
       .then(function (res) {
         if (res.status !== 'success') return { ok: false, message: res.message };
+        // Bug reportado (2026-08-12): antes se actualizaba el estado local
+        // con lo que ESTE cliente habia mandado a guardar, nunca con lo
+        // que el servidor confirmo -- ante 2 guardados casi simultaneos
+        // (o uno perdido) la pantalla quedaba desincronizada de la hoja
+        // real sin ningun aviso ("agrego en BD pero no veo en pantalla").
+        // Ahora se usa la lista que el backend devuelve como fuente de
+        // verdad en vez del payload que se mando.
+        var listaConfirmada = (res.data && res.data.lista) || nuevaListaSociedad;
         var deOtras = state.ccListaCompleta.filter(function (r) { return r.sociedad !== sociedad; });
-        state.ccListaCompleta = deOtras.concat(nuevaListaSociedad.map(function (r) { return Object.assign({ sociedad: sociedad }, r); }));
+        state.ccListaCompleta = deOtras.concat(listaConfirmada.map(function (r) { return Object.assign({ sociedad: sociedad }, r); }));
         return { ok: true };
       })
       .catch(function (e) { return { ok: false, message: String(e.message || e) }; });

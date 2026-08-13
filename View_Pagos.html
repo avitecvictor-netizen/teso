@@ -767,6 +767,19 @@
    * no tiene un monto valido (hallazgo del revisor). */
   function autorizarSeleccionadas(lineas) {
     var seleccionadas = lineas.filter(function (l) { return l.checked; });
+    // Bug reportado (2026-08-12): si el usuario teclea el monto parcial y
+    // hace clic en "Autorizar seleccionadas" sin salir antes del campo,
+    // l.montoAutorizado en memoria puede no reflejar aun lo tecleado --
+    // el commit depende del evento 'change' del input, que solo dispara
+    // al perder el foco, y ese blur no esta garantizado antes de que
+    // este handler de click corra. Se relee el valor directo del DOM
+    // aqui para cerrar esa ventana de carrera sin depender del orden de
+    // eventos del navegador.
+    seleccionadas.forEach(function (l) {
+      if (l.approvalType !== 'parcial') return;
+      var input = document.querySelector('[data-focus-key="monto-' + l.id + '"]');
+      if (input && input.value !== '') l.montoAutorizado = Number(input.value);
+    });
     var invalidas = seleccionadas.filter(function (l) {
       if (l.approvalType !== 'parcial') return false;
       var v = Number(l.montoAutorizado);
@@ -2125,7 +2138,16 @@
         if (selStart != null && el.setSelectionRange) { try { el.setSelectionRange(selStart, selEnd); } catch (e) { } }
       }
     }
-    if (mainScroll) mainScroll.scrollTop = scrollTop;
+    if (mainScroll) {
+      mainScroll.scrollTop = scrollTop;
+      // Bug reportado (2026-08-12): el salto de scroll seguia pasando
+      // pese al restore de arriba -- el "scroll anchoring" nativo del
+      // navegador puede reajustar scrollTop en el siguiente ciclo de
+      // layout/paint, ya DESPUES de que este script lo fijo (ademas de
+      // overflow-anchor:none en #veva-main, Index_1.html). Se refuerza
+      // con un segundo set en el proximo frame como defensa adicional.
+      requestAnimationFrame(function () { mainScroll.scrollTop = scrollTop; });
+    }
   }
 
   VEVA.registerView('workflow-pagos', {
