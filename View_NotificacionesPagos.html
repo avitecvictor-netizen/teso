@@ -26,35 +26,33 @@
     // sociedades de un jalon, sin repetir el alta una por una). Mapa
     // {sociedad: true/false}, no array -- mas facil de togglear desde
     // checkboxes sin buscar indice.
-    nuevoSociedades: {}
+    nuevoSociedades: {}, esAdmin: false
   };
 
-  // Mismo criterio que _puedeConciliarOComprobantes en Svc_Pagos.js
-  // (Tesoreria+Contador, falla abierto si CAT_USUARIOS esta vacio) --
-  // aqui es solo gateo de UI, el backend ya lo valida de verdad en
-  // guardarListaNotificacionesPago.
-  var SIN_ACENTOS_NOTIF = new RegExp(String.fromCharCode(91) + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + String.fromCharCode(93), 'g');
-  function normalizarRol(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(SIN_ACENTOS_NOTIF, ''); }
-  // Hallazgo real 2026-07-26: una persona puede tener varias filas en
-  // CAT_USUARIOS con el mismo email (una por rol) -- getUsuarioActual
-  // devuelve `roles` (array), no `rol` (singular). Se revisa si
-  // Tesoreria o Contador esta presente en CUALQUIERA de sus roles
-  // activos, mismo criterio que puedeConciliarComprobantes() en
-  // View_Pagos.html y _puedeConciliarOComprobantes en Svc_Pagos.js.
+  /** puedeEditar (corregido 2026-08-12, hallazgo de auditoria): antes
+   * comparaba roles "Tesoreria"/"Contador" de CAT_USUARIOS (mismo
+   * criterio que _puedeConciliarOComprobantes) -- desde el Bloque 2 de
+   * control de acceso (2026-08-10) el backend real
+   * (guardarListaNotificacionesPago) ya NO acepta ese criterio, solo
+   * acepta administradores de CONFIG_TESORERIA (_esAdminTesoreria). El
+   * frontend viejo podia ocultar los controles de edicion a un
+   * administrador real sin ese rol, mostrando un mensaje falso aunque el
+   * backend si aceptara su cambio. Ahora usa `state.esAdmin`, calculado
+   * 100% server-side (mismo campo que ya devuelve getConfigTesoreria
+   * para la pestaña "Remitente" de Lista de Distribucion) -- el cliente
+   * nunca decide, solo refleja lo que el backend ya resolvio. */
   function puedeEditar() {
-    if (!state.usuario) return false;
-    if (state.usuario.catalogoVacio) return true;
-    var roles = (state.usuario.roles || []).map(normalizarRol);
-    return roles.indexOf(normalizarRol('Tesorería')) >= 0 || roles.indexOf(normalizarRol('Contador')) >= 0;
+    return !!state.esAdmin;
   }
 
   function cargar() {
     state.loading = true; state.error = null; redraw();
-    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getListaNotificacionesPago'), VEVA.gas('getCatalogoCuentasPago')])
+    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getListaNotificacionesPago'), VEVA.gas('getCatalogoCuentasPago'), VEVA.gas('getConfigTesoreria')])
       .then(function (res) {
-        var resUsuario = res[0], resLista = res[1], resCat = res[2];
+        var resUsuario = res[0], resLista = res[1], resCat = res[2], resConfig = res[3];
         if (!resLista || resLista.status !== 'success') throw new Error((resLista && resLista.message) || 'Error al cargar la lista de notificaciones');
         state.usuario = (resUsuario && resUsuario.status === 'success') ? resUsuario.data : null;
+        state.esAdmin = (resConfig && resConfig.status === 'success') ? !!resConfig.data.esAdmin : false;
         state.listaCompleta = resLista.data;
         var soc = {};
         ((resCat && resCat.status === 'success') ? resCat.data : []).forEach(function (c) { if (c.nombreCorto) soc[c.nombreCorto] = true; });
@@ -274,7 +272,7 @@
    * CONVENCIONES_TESO_1.md) para no perder el cursor en cada tecla. */
   function renderAgregarForm() {
     if (!puedeEditar()) {
-      return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo Tesorería o Contador pueden editar esta lista.']);
+      return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo un administrador de Tesorería puede editar esta lista.']);
     }
     var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'notif-email', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
     inEmail.value = state.newEmail;

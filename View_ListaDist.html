@@ -40,7 +40,7 @@
     // ---- Tab "CC de Pagos" (Bloque E, nuevo) ----
     ccListaCompleta: [], ccSociedades: [], ccSociedadSel: '',
     ccLoading: true, ccSaving: false, ccError: null,
-    ccNewEmail: '', ccNewNombre: '', ccUsuario: null,
+    ccNewEmail: '', ccNewNombre: '', ccUsuario: null, ccEsAdmin: false,
     ccNuevoSociedades: {}, ccCargado: false,
     // Modo "por persona" (2026-08-02): ver/editar el estado de un email a
     // traves de TODAS las sociedades a la vez -- antes solo se podia ver
@@ -192,22 +192,29 @@
   // la tab "Reporte de Posicion" que comparte este mismo archivo.
   // =====================================================================
 
-  var SIN_ACENTOS_CC = new RegExp(String.fromCharCode(91) + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + String.fromCharCode(93), 'g');
-  function ccNormalizarRol(s) { return String(s || '').trim().toLowerCase().normalize('NFD').replace(SIN_ACENTOS_CC, ''); }
+  /** ccPuedeEditar (corregido 2026-08-12, hallazgo de auditoria): antes
+   * comparaba roles "Tesoreria"/"Contador" de CAT_USUARIOS -- desde el
+   * Bloque 2 de control de acceso (2026-08-10) el backend real
+   * (guardarListaCcPagos) ya NO acepta ese criterio, solo acepta
+   * administradores de CONFIG_TESORERIA (_esAdminTesoreria). El frontend
+   * viejo podia ocultar los controles de edicion a un administrador real
+   * sin ese rol, mostrando el mensaje falso "Solo Tesoreria o Contador
+   * pueden editar esta lista" aunque el backend si aceptara su cambio.
+   * Ahora usa `state.ccEsAdmin`, calculado 100% server-side (mismo
+   * criterio ya usado en la pestaña "Remitente", ver remEsAdmin) -- el
+   * cliente nunca decide, solo refleja lo que el backend ya resolvio. */
   function ccPuedeEditar() {
-    if (!state.ccUsuario) return false;
-    if (state.ccUsuario.catalogoVacio) return true;
-    var roles = (state.ccUsuario.roles || []).map(ccNormalizarRol);
-    return roles.indexOf(ccNormalizarRol('Tesorería')) >= 0 || roles.indexOf(ccNormalizarRol('Contador')) >= 0;
+    return !!state.ccEsAdmin;
   }
 
   function ccCargar() {
     state.ccCargado = true; state.ccLoading = true; state.ccError = null; redraw();
-    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getListaCcPagos'), VEVA.gas('getCatalogoCuentasPago')])
+    Promise.all([VEVA.gas('getUsuarioActual'), VEVA.gas('getListaCcPagos'), VEVA.gas('getCatalogoCuentasPago'), VEVA.gas('getConfigTesoreria')])
       .then(function (res) {
-        var resUsuario = res[0], resLista = res[1], resCat = res[2];
+        var resUsuario = res[0], resLista = res[1], resCat = res[2], resConfig = res[3];
         if (!resLista || resLista.status !== 'success') throw new Error((resLista && resLista.message) || 'Error al cargar la lista de CC');
         state.ccUsuario = (resUsuario && resUsuario.status === 'success') ? resUsuario.data : null;
+        state.ccEsAdmin = (resConfig && resConfig.status === 'success') ? !!resConfig.data.esAdmin : false;
         state.ccListaCompleta = resLista.data;
         var soc = {};
         ((resCat && resCat.status === 'success') ? resCat.data : []).forEach(function (c) { if (c.nombreCorto) soc[c.nombreCorto] = true; });
@@ -377,7 +384,7 @@
 
   function ccRenderAgregarForm() {
     if (!ccPuedeEditar()) {
-      return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo Tesorería o Contador pueden editar esta lista.']);
+      return VEVA.dom.el('div', { class: 'px-5 py-3 border-t border-[#e6ebf1] bg-[#f6f9fc]/50 text-[12px] text-[#697386]' }, ['Solo un administrador de Tesorería puede editar esta lista.']);
     }
     var inEmail = VEVA.dom.el('input', { type: 'email', placeholder: 'correo@empresa.com', 'data-focus-key': 'cc-email', class: 'w-full text-[12px] border border-[#e6ebf1] rounded-lg px-3 py-2 bg-white outline-none focus:border-[#635bff]' }, []);
     inEmail.value = state.ccNewEmail;
