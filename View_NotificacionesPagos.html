@@ -85,13 +85,14 @@
    * (quitar lo viejo de esa sociedad, agregar lo nuevo) para no depender
    * de un recargar() completo en cada edicion.
    *
+   * Usada hoy por guardar() (toggle/eliminar/editarCampo de 1 sociedad a
+   * la vez, la que se este viendo) -- el alta multi-sociedad de agregar()
+   * YA NO pasa por aqui (ver comentario de agregar() mas abajo, 2026-08-14).
+   *
    * Hallazgo real del revisor: antes esta funcion mezclaba dos caminos
    * de falla distintos -- un {status:'error'} de negocio RESOLVIA la
-   * promesa, pero una excepcion real de red/backend la RECHAZABA. Eso
-   * hacia que agregar() (que encadena varias sociedades) se comportara
-   * distinto segun el TIPO de falla, sin que nadie lo hubiera decidido a
-   * proposito. Ahora esta funcion NUNCA rechaza -- siempre resuelve con
-   * {ok, message} -- para que el encadenado sea 100% predecible. */
+   * promesa, pero una excepcion real de red/backend la RECHAZABA. Ahora
+   * esta funcion NUNCA rechaza -- siempre resuelve con {ok, message}. */
   function guardarParaSociedad(sociedad, nuevaListaSociedad) {
     return VEVA.gas('guardarListaNotificacionesPago', { sociedad: sociedad, lista: nuevaListaSociedad })
       .then(function (res) {
@@ -128,18 +129,25 @@
 
   /** Agrega el contacto nuevo a TODAS las sociedades marcadas en el
    * checklist (2026-07-26, pedido del usuario: multi-sociedad de un
-   * jalon). Las llamadas se ENCADENAN una por una a proposito -- nunca
-   * en paralelo: aunque LockService ya serializa las escrituras del lado
-   * del servidor, encadenar del lado del cliente deja el estado local
-   * (state.listaCompleta) consistente entre pasos (la lista que se manda
-   * a la sociedad 2 ya refleja lo que la sociedad 1 acabo de guardar) y
-   * los mensajes de error atribuibles a una sociedad concreta.
+   * jalon).
    *
-   * Hallazgo real del revisor (2da ronda): si el checklist queda sin
-   * ninguna sociedad marcada (el usuario destildo todas, incluida la
-   * actual), antes se caia en un fallback silencioso a la sociedad
-   * vista -- justo la que el usuario dejo destildada a proposito. Ahora
-   * se bloquea con un error explicito en vez de adivinar la intencion. */
+   * 2026-08-14 (bug real reportado): antes esto encadenaba 1 llamada de
+   * red por sociedad marcada (hasta 19 round-trips seguidos) -- cada una
+   * era una oportunidad independiente de que la respuesta se perdiera en
+   * el puente cliente-servidor de Apps Script ("Cannot read properties
+   * of null"; el dato SI llegaba a guardarse pero la confirmacion no).
+   * Ahora es UNA sola llamada a agregarNotificacionMultiSociedad con
+   * todas las sociedades en el payload -- el servidor las guarda todas
+   * bajo un solo LockService (ver Svc_Pagos.js) y regresa el resultado
+   * real de cada una en una sola respuesta. guardarParaSociedad() ya NO
+   * participa en este flujo (solo la usan toggle/eliminar/editarCampo,
+   * de 1 sociedad a la vez).
+   *
+   * Hallazgo real del revisor (2da ronda, previo a este cambio): si el
+   * checklist queda sin ninguna sociedad marcada, antes se caia en un
+   * fallback silencioso a la sociedad vista -- justo la que el usuario
+   * dejo destildada a proposito. Se bloquea con un error explicito en
+   * vez de adivinar la intencion (sigue vigente con el cambio de hoy). */
   function agregar() {
     // Bug real (auditoria 2026-08-13, 3ra ronda): guarda de reentrada
     // explicita -- no depender solo del atributo disabled del boton, ya
@@ -158,19 +166,27 @@
     state.newEmail = ''; state.newNombre = '';
     state.saving = true; state.error = null; redraw();
 
-    var erroresPorSociedad = [];
-    var cadena = Promise.resolve();
-    sociedadesDestino.forEach(function (soc) {
-      cadena = cadena.then(function () {
-        var listaSoc = listaDeSociedad(soc).concat([{ email: email, nombre: nombre, activo: true }]);
-        return guardarParaSociedad(soc, listaSoc).then(function (r) { if (!r.ok) erroresPorSociedad.push(soc + ': ' + r.message); });
-      });
-    });
-    cadena.finally(function () {
-      state.saving = false;
-      if (erroresPorSociedad.length) state.error = erroresPorSociedad.join(' · ');
-      redraw();
-    });
+    // Bug real (2026-08-14): antes esto encadenaba 1 llamada de red por
+    // sociedad marcada (hasta 19 round-trips seguidos) -- cada una era
+    // una oportunidad independiente de que la respuesta se perdiera en
+    // el puente cliente-servidor de Apps Script ("Cannot read properties
+    // of null", reportado por el usuario, el dato SI llegaba a guardarse
+    // pero la confirmacion no). Ahora es UNA sola llamada con todas las
+    // sociedades en el payload -- el servidor las guarda todas bajo un
+    // solo LockService y regresa el resultado real de cada una.
+    VEVA.gas('agregarNotificacionMultiSociedad', { sociedades: sociedadesDestino, email: email, nombre: nombre })
+      .then(function (res) {
+        if (!res) { state.error = 'Sin respuesta del servidor -- refresca la pantalla para confirmar si se guardó antes de repetir.'; return; }
+        if (res.status !== 'success') { state.error = res.message; return; }
+        var resultados = res.data.resultados;
+        var deOtras = state.listaCompleta.filter(function (r) { return sociedadesDestino.indexOf(r.sociedad) < 0; });
+        var deEstas = resultados.reduce(function (acc, r) {
+          return acc.concat(r.lista.map(function (row) { return Object.assign({ sociedad: r.sociedad }, row); }));
+        }, []);
+        state.listaCompleta = deOtras.concat(deEstas);
+      })
+      .catch(function (e) { state.error = String(e.message || e); })
+      .finally(function () { state.saving = false; redraw(); });
   }
 
   function toggleActivo(i) {

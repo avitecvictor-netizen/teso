@@ -2944,11 +2944,18 @@ function procesarColaNotificacionesPago() {
   }
 }
 
-/** Envio real de los correos -- antes era el cuerpo de
- * _notificarTransicionPagosMultiple; ahora solo lo llama
- * procesarColaNotificacionesPago (el trigger), nunca directo desde una
- * mutacion de PARTIDAS_PAGO. Mismo comportamiento exacto de antes del
- * Bug D, solo que ahora corre en una ejecucion aparte. */
+/** Envio real de los correos. Historial (para no confundirse editando
+ * esto despues): originalmente era el cuerpo inline de
+ * _notificarTransicionPagosMultiple; el 2026-08-12 (Bug D) se movio
+ * aqui para que solo la llamara procesarColaNotificacionesPago (el
+ * trigger de una cola async); el 2026-08-13 esa cola resulto poco
+ * confiable (trigger ligado a la identidad de quien lo creo, podia
+ * fallar en silencio) y se REVIRTIO -- _notificarTransicionPagosMultiple
+ * vuelve a llamar a esta funcion DIRECTO y SINCRONO, dentro del mismo
+ * request de la mutacion de PARTIDAS_PAGO, igual que antes del Bug D.
+ * procesarColaNotificacionesPago queda sin usar (ver su propio
+ * comentario) -- no se borro para no romper un trigger ya instalado en
+ * produccion apuntando a ella. */
 function _procesarGrupoNotificacionPagos(ss, grupos, emailActor) {
   try {
     var propRows = _pagoSheetToObjects(_ensurePropuestasPagoSheet(ss), PROPUESTAS_PAGO_HEADERS);
@@ -3473,6 +3480,61 @@ function guardarListaCcPagos(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/** Alta de un contacto en VARIAS sociedades a la vez, en UNA SOLA
+ * ejecucion de servidor (bug real reportado 2026-08-14): antes el
+ * frontend encadenaba 1 llamada de red por sociedad marcada en el
+ * checklist (hasta 19 round-trips seguidos vía guardarListaNotificacionesPago/
+ * guardarListaCcPagos) -- cada una era una oportunidad independiente de
+ * que la respuesta se perdiera en el puente cliente-servidor de Apps
+ * Script, dejando la pantalla desincronizada de lo que en realidad ya
+ * se habia guardado. Ahora una sola llamada agrega el contacto a todas
+ * las sociedades pedidas bajo UN SOLO LockService, y regresa el
+ * resultado real por sociedad para que el frontend actualice su estado
+ * de una vez. Compartida por notificaciones (TO) y CC -- unica
+ * diferencia real es la hoja/vista/mensaje de permiso, igual que el
+ * resto de este par de funciones (getListaCcPagos/getListaNotificacionesPago). */
+function _agregarContactoMultiSociedad(ensureSheetFn, headers, vistaId, mensajeSinPermiso, payload) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+    var ss = SpreadsheetApp.openById(SALDOS_SHEET_ID);
+    if (!_tieneAccesoAVista(ss, vistaId)) return { status: 'error', message: mensajeSinPermiso };
+    var sh = ensureSheetFn(ss);
+    var sociedades = payload.sociedades || [];
+    if (!sociedades.length) return { status: 'error', message: 'Marca al menos una sociedad antes de agregar.' };
+    var email = String(payload.email || '').trim();
+    if (!email || email.indexOf('@') < 0) return { status: 'error', message: 'Correo inválido.' };
+    var nombre = String(payload.nombre || '').trim();
+
+    // Snapshot inicial solo para decidir si el email YA esta en cada
+    // sociedad (evita agregarlo 2 veces si el usuario reintenta) --
+    // _guardarListaPorSociedad ya relee la hoja fresca en cada iteracion
+    // del forEach de abajo, asi que cada escritura ve el resultado real
+    // de las anteriores, no esta copia congelada.
+    var actuales = _pagoSheetToObjects(sh, headers);
+    var resultados = sociedades.map(function (soc) {
+      var listaSoc = actuales.filter(function (r) { return r.sociedad === soc; });
+      var yaExiste = listaSoc.some(function (r) { return String(r.email || '').toLowerCase() === email.toLowerCase(); });
+      var nueva = yaExiste ? listaSoc : listaSoc.concat([{ email: email, nombre: nombre, activo: true }]);
+      var guardada = _guardarListaPorSociedad(sh, headers, soc, nueva);
+      return { sociedad: soc, lista: guardada };
+    });
+    return { status: 'success', data: { resultados: resultados }, message: 'Contacto agregado a ' + sociedades.length + ' sociedad(es).' };
+  } catch (e) {
+    return { status: 'error', message: e.toString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function agregarNotificacionMultiSociedad(payload) {
+  return _agregarContactoMultiSociedad(_ensureConfigNotificacionesPagoSheet, CONFIG_NOTIFICACIONES_PAGOS_HEADERS, 'notificaciones-pagos', 'No tienes permiso para editar la lista de notificaciones.', payload);
+}
+
+function agregarCcMultiSociedad(payload) {
+  return _agregarContactoMultiSociedad(_ensureConfigCcPagosSheet, CONFIG_CC_PAGOS_HEADERS, 'lista-dist', 'No tienes permiso para editar la lista de CC de pagos.', payload);
 }
 
 // Las funciones temporales de diagnostico/reset (_debugInspeccionarHojasPago,
